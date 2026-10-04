@@ -2,7 +2,7 @@
 
 This covers every game built on `com.recomp.n64` (Super Smash Bros. is the reference game).
 What a specific game publishes and where its hooks are is in that game's package, e.g.
-[`com.recomp.ssmb64/Docs/Modding.md`](../../com.recomp.ssmb64/Docs/Modding.md).
+[`com.recomp.ssb64/Docs/Modding.md`](../../com.recomp.ssb64/Docs/Modding.md).
 
 A recompiled game is the game's own C code (from its decompilation) running on this runtime.
 A mod is therefore ordinary C compiled into the game, and it runs on every target

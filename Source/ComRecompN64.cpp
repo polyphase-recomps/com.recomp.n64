@@ -5,6 +5,10 @@
 
 #include "Plugins/PolyphasePluginAPI.h"
 #include "Plugins/PolyphaseEngineAPI.h"
+#include "Plugins/EditorUIHooks.h"
+#include "Plugins/PolyphaseBuildTargetAPI.h"
+
+#include "N64Dependencies.h"
 
 static PolyphaseEngineAPI* sEngineAPI = nullptr;
 
@@ -38,12 +42,57 @@ static void RegisterScriptFuncs(lua_State* L)
 }
 
 #if EDITOR
+static EditorUIHooks* sHooks = nullptr;
+
+// Builds the game packages for the platform being packaged unless the profile turned it
+// off (Target Options); a failure cancels the build.
+static bool OnPreBuild(int32_t platform, void* userData)
+{
+    (void)userData;
+    char value[8] = "";
+    char decomp[512] = "";
+
+    if (sHooks != nullptr && sHooks->GetBuildSetting != nullptr)
+    {
+        if (sHooks->GetBuildSetting(N64Dependencies::kSetupOption, value, sizeof(value)) && value[0] == '0')
+        {
+            return true;
+        }
+        sHooks->GetBuildSetting(N64Dependencies::kDecompOption, decomp, sizeof(decomp));
+    }
+    if (!N64Dependencies::SetupAll(platform, decomp))
+    {
+        if (sEngineAPI && sEngineAPI->LogError)
+        {
+            sEngineAPI->LogError("[n64] Setup Dependencies failed, packaging cancelled (see the log)");
+        }
+        return false;
+    }
+    return true;
+}
+
 static void RegisterEditorUI(EditorUIHooks* hooks, uint64_t hookId)
 {
-    // Register editor UI extensions here
-    // Example:
-    // hooks->AddMenuItem(hookId, "Developer", "com.recomp.n64 Tool",
-    //     [](void*) { /* do something */ }, nullptr, nullptr);
+    sHooks = hooks;
+    if (hooks->AddTargetOptions != nullptr)
+    {
+        hooks->AddTargetOptions(hookId, "N64 Recomp",
+            [](const PolyphaseBuildContext* ctx, void*) { N64Dependencies::DrawTargetOptions(ctx); }, nullptr);
+    }
+    else
+    {
+        // engines without Target Options sections for every target
+        hooks->AddMenuItem(hookId, "Developer", "N64/Setup Dependencies (Windows)",
+            [](void*) { N64Dependencies::SetupAllAsync(0, nullptr); }, nullptr, nullptr);
+    }
+    hooks->RegisterOnPreBuild(hookId, OnPreBuild, nullptr);
+    N64Dependencies::CheckReady();
+}
+
+static void TickEditor(float deltaTime)
+{
+    (void)deltaTime;
+    N64Dependencies::Tick();
 }
 #endif
 
@@ -54,12 +103,15 @@ static int FillDesc(PolyphasePluginDesc* desc)
     desc->pluginVersion = "1.0.0";
     desc->OnLoad = OnLoad;
     desc->OnUnload = OnUnload;
+    desc->Tick = nullptr;
     desc->RegisterTypes = RegisterTypes;
     desc->RegisterScriptFuncs = RegisterScriptFuncs;
 #if EDITOR
     desc->RegisterEditorUI = RegisterEditorUI;
+    desc->TickEditor = TickEditor;
 #else
     desc->RegisterEditorUI = nullptr;
+    desc->TickEditor = nullptr;
 #endif
     desc->OnEditorPreInit = nullptr;
     desc->OnEditorReady = nullptr;

@@ -1,6 +1,6 @@
 /*
  * What a game has to supply to the shared N64 runtime. Each game package implements these
- * (see com.recomp.ssmb64/Native/port/guest/port_game.c) next to its own patches; everything
+ * (see com.recomp.ssb64/Native/port/guest/port_game.c) next to its own patches; everything
  * else in the runtime is game-independent.
  *
  * The game also provides <port_types.h>, which pulls in its basic types (u8..u64, f32, sb32).

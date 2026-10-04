@@ -101,6 +101,8 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="Source\ComRecompN64.cpp" />
+    <ClCompile Include="Source\N64Dependencies.cpp" />
+    <ClInclude Include="Source\N64Dependencies.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

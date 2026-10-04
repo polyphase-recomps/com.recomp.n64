@@ -5,7 +5,7 @@ hardware (threads, controllers, audio, a display list renderer in software and f
 decompiled game is compiled against, plus the build pieces and tools game packages share.
 
 > **No game is included.** This package contains no ROM, no game assets and no game code.
-> A game package (for example `com.recomp.ssmb64`) builds the game from **your own ROM** and a
+> A game package (for example `com.recomp.ssb64`) builds the game from **your own ROM** and a
 > decompilation, on your machine. See that package's README for the steps; nothing here needs
 > building on its own.
 
@@ -25,7 +25,7 @@ Docs/Modding.md         mods and the script bridge (Lua `N64` table)
 
 A game package supplies its decompiled sources, a `port_types.h`, the hooks in
 `Native/include/port_game.h`, and a `CMakeLists.txt` that includes `Native/cmake/N64Port.cmake`.
-`com.recomp.ssmb64` is the reference.
+`com.recomp.ssb64` is the reference.
 
 Game data is never shipped: `Native/tools/make_rom_pack.py` cuts the asset ranges (no code)
 out of the user's ROM at build time into a git-ignored pack the game loads at run time.

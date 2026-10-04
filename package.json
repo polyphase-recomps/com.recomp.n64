@@ -1,7 +1,7 @@
 {
     "name": "com.recomp.n64",
     "author": "",
-    "description": "Shared runtime for natively compiled N64 decomps (libultra shim, F3DEX2 renderer, audio, host backends, build rules). Game packages such as com.recomp.ssmb64 build against Native/.",
+    "description": "Shared runtime for natively compiled N64 decomps (libultra shim, F3DEX2 renderer, audio, host backends, build rules). Game packages such as com.recomp.ssb64 build against Native/.",
     "version": "1.0.0",
     "native": {
         "target": "engine",
