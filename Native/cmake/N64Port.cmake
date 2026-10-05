@@ -172,6 +172,41 @@ function(n64port_overlay_sections)
 endfunction()
 
 # ---------------------------------------------------------------------------
+# Guest model: "native" compiles the game for the host itself; "wasm-be" compiles it to a
+# big-endian WebAssembly guest translated back to C (for little-endian hosts and games that
+# read big-endian ROM data directly; see cmake/N64Wasm.cmake).
+# ---------------------------------------------------------------------------
+set(N64PORT_GUEST "native" CACHE STRING "Guest model: native or wasm-be")
+include("${CMAKE_CURRENT_LIST_DIR}/N64Wasm.cmake")
+
+# ---------------------------------------------------------------------------
+# Console libraries: keep the game's C library to itself
+# ---------------------------------------------------------------------------
+# libultra brings its own sprintf / memcpy / strlen / guPerspective ... and the runtime a few
+# more (bzero, bcopy). Linked into a console executable they clash with newlib and libogc, or
+# the engine's calls bind to them. After the library is built, every symbol it shares with
+# those libraries is renamed n64_<name> inside it (tools/isolate_symbols.py).
+function(n64port_isolate_system_symbols target)
+    if(NOT N64PORT_CONSOLE MATCHES "Wii|GameCube")
+        return()
+    endif()
+    execute_process(COMMAND "${CMAKE_C_COMPILER}" -print-file-name=libc.a OUTPUT_VARIABLE libc OUTPUT_STRIP_TRAILING_WHITESPACE)
+    execute_process(COMMAND "${CMAKE_C_COMPILER}" -print-file-name=libm.a OUTPUT_VARIABLE libm OUTPUT_STRIP_TRAILING_WHITESPACE)
+    get_filename_component(nm_dir "${CMAKE_C_COMPILER}" DIRECTORY)
+    set(nm "${nm_dir}/powerpc-eabi-nm${CMAKE_EXECUTABLE_SUFFIX}")
+    if(CMAKE_HOST_WIN32)
+        set(nm "${nm_dir}/powerpc-eabi-nm.exe")
+    endif()
+    # both libogc flavours: the engine links libogc on Wii and libogc2 on GameCube
+    file(GLOB ogc_libs "${DEVKITPRO}/libogc/lib/wii/*.a" "${DEVKITPRO}/libogc/lib/cube/*.a"
+                       "${DEVKITPRO}/libogc2/*/lib/*.a" "${N64PORT_OGC_LIBDIR}/*.a")
+    add_custom_command(TARGET ${target} POST_BUILD
+        COMMAND "${Python3_EXECUTABLE}" "${N64PORT_DIR}/tools/isolate_symbols.py" "${nm}" "${CMAKE_OBJCOPY}"
+                "$<TARGET_FILE:${target}>" "${libc}" "${libm}" ${ogc_libs}
+        VERBATIM)
+endfunction()
+
+# ---------------------------------------------------------------------------
 # Headless runner
 # ---------------------------------------------------------------------------
 function(n64port_add_host_exe name library)

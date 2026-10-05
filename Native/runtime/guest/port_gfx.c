@@ -724,10 +724,21 @@ static void raster_triangle(const PortScreenVtx *v0, const PortScreenVtx *v1, co
     s32 x0, x1, y0, y1, x, y;
     sb32 use_z = (sGeometryMode & G_ZBUFFER) != 0;
     sb32 use_tex = sTextureOn;
+    sb32 decal = (sOtherModeL & ZMODE_DEC) == ZMODE_DEC;
+    f32 z_slack = 0.0F;
 
     if (area == 0.0F)
     {
         return;
+    }
+    if (decal)
+    {
+        /* Decals (shadows, marks on the ground) are drawn level with what is already there: the
+         * RDP lets them through within the polygon's own depth change per pixel. */
+        f32 dzdx = ((v1->z - v0->z) * (v2->y - v0->y) - (v2->z - v0->z) * (v1->y - v0->y)) / area;
+        f32 dzdy = ((v1->x - v0->x) * (v2->z - v0->z) - (v2->x - v0->x) * (v1->z - v0->z)) / area;
+
+        z_slack = (dzdx < 0.0F ? -dzdx : dzdx) + (dzdy < 0.0F ? -dzdy : dzdy) + 1.0e-5F;
     }
     /* Screen y points down, so front faces (counter-clockwise on N64) have negative area. */
     if ((sGeometryMode & G_CULL_BACK) && area > 0.0F) return;
@@ -759,7 +770,8 @@ static void raster_triangle(const PortScreenVtx *v0, const PortScreenVtx *v1, co
                 continue;
             }
             z = w0 * v0->z + w1 * v1->z + w2 * v2->z;
-            if (use_z && (sOtherModeL & Z_CMP) && z >= sDepth[y * FB_W + x])
+            if (use_z && (sOtherModeL & Z_CMP) &&
+                (decal ? z > sDepth[y * FB_W + x] + z_slack : z >= sDepth[y * FB_W + x]))
             {
                 continue;
             }
@@ -1001,6 +1013,33 @@ static void gfx_move_mem(u32 w0, uintptr_t w1)
     }
 }
 
+static s32 sLodMode = PORT_LOD_DYNAMIC;
+
+void port_gfx_set_lod(s32 mode)
+{
+    sLodMode = (mode >= PORT_LOD_DYNAMIC && mode <= PORT_LOD_LOW) ? mode : PORT_LOD_DYNAMIC;
+}
+
+s32 port_gfx_lod(void)
+{
+    return sLodMode;
+}
+
+/* Where a G_DL / branch goes. */
+static Gfx *gfx_dl_target(uintptr_t p1)
+{
+    Gfx *target = gfx_addr(p1);
+
+    if (gfx_is_segmented(p1) && target != NULL)
+    {
+        /* A segmented display list address counts in 8-byte N64 commands (models call their
+         * material lists as segment 0xE + index * 8); native commands are 16 bytes when
+         * pointers are 64-bit. */
+        target = (Gfx *)(sSegments[(p1 >> 24) & 0xF] + (p1 & 0x00FFFFFF) * (sizeof(Gfx) / 8));
+    }
+    return target;
+}
+
 static Gfx *sDlStack[DL_STACK_MAX];
 static s32 sDlDepth;
 
@@ -1132,21 +1171,42 @@ static void gfx_run(Gfx *dl)
         case G_MOVEMEM: gfx_move_mem(w0, p1); break;
         case G_DL:
         {
-            Gfx *target = gfx_addr(p1);
-
-            if (gfx_is_segmented(p1) && target != NULL)
-            {
-                /* A segmented display list address counts in 8-byte N64 commands (models call their
-                 * material lists as segment 0xE + index * 8); native commands are 16 bytes when
-                 * pointers are 64-bit. */
-                target = (Gfx *)(sSegments[(p1 >> 24) & 0xF] + (p1 & 0x00FFFFFF) * (sizeof(Gfx) / 8));
-            }
+            Gfx *target = gfx_dl_target(p1);
 
             if (((w0 >> 16) & 0xFF) == G_DL_PUSH && depth < DL_STACK_MAX)
             {
                 stack[depth++] = dl;
             }
             dl = target;
+            break;
+        }
+        case G_BRANCH_Z:
+        {
+            /* gSPBranchLessZ: continue in the list G_RDPHALF_1 named when the vertex is at least as
+             * near as w1 (screen depth, 0..0x3FF in 16.16). Models choose their level of detail
+             * this way; a vertex behind the eye takes the branch, as the RSP's overflowing depth does. */
+            const PortVtx *v = &sVtx[((w0 & 0xFFF) >> 1) % VTX_MAX];
+            sb32 take = TRUE;
+
+            if (sLodMode == PORT_LOD_FULL)
+            {
+                take = TRUE; /* the first test of a chain names the most detailed model */
+            }
+            else if (sLodMode == PORT_LOD_LOW)
+            {
+                /* only the last test of the chain: the least detailed model */
+                take = !((dl[0].words.w0 >> 24) == G_RDPHALF_1 && (dl[1].words.w0 >> 24) == G_BRANCH_Z);
+            }
+            else if (v->w > 0.0F)
+            {
+                f32 depth_z = (v->z / v->w) * sVpScale[2] + sVpTrans[2];
+
+                take = depth_z <= (f32)(s32)w1 / 65536.0F;
+            }
+            if (take)
+            {
+                dl = gfx_dl_target((uintptr_t)sRdpHalf1);
+            }
             break;
         }
         case G_ENDDL:
@@ -1237,8 +1297,9 @@ static void gfx_run(Gfx *dl)
         case G_NOOP: case G_SPNOOP: case G_LOAD_UCODE: case G_RDPLOADSYNC: case G_RDPPIPESYNC:
         case G_RDPTILESYNC: case G_RDPFULLSYNC: case G_SETPRIMDEPTH:
         case G_SETKEYGB: case G_SETKEYR: case G_SETCONVERT: case G_CULLDL:
-        case G_BRANCH_Z: case G_LINE3D: case G_SPECIAL_1: case G_SPECIAL_2: case G_SPECIAL_3:
+        case G_LINE3D: case G_SPECIAL_1: case G_SPECIAL_2: case G_SPECIAL_3:
         case G_DMA_IO:
+        case 0x0B: /* S2DEX G_OBJ_RENDERMODE (object render flags; no effect on the native renderer) */
             break;
         default:
             sStatUnknown++;
@@ -1352,6 +1413,15 @@ int n64_draws_to_screen(void)
     return 1;
 #else
     return 0;
+#endif
+}
+
+void n64_set_display_rect(float x, float y, float width, float height)
+{
+#ifdef PORT_GFX_GPU
+    port_gpu_set_target_rect(x, y, width, height);
+#else
+    (void)x, (void)y, (void)width, (void)height;
 #endif
 }
 

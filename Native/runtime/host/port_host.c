@@ -89,6 +89,7 @@ int port_env_int(const char *name)
     return (value != NULL) ? atoi(value) : 0;
 }
 
+#ifndef PORT_WASM_HOST /* (the wasm guest keeps its arena and overlays in its own memory) */
 /* ---- arena ----------------------------------------------------------------
  * One reservation the backend places where every address inside it can be stored
  * as a 32-bit token (see port_prelude.h). */
@@ -150,6 +151,8 @@ unsigned long long port_arena_used(void)
     return sArenaUsed;
 }
 
+#endif
+
 void port_memcpy(void *dst, const void *src, unsigned long long size)
 {
     memmove(dst, src, size);
@@ -164,6 +167,7 @@ void port_memset(void *dst, int value, unsigned long long size)
 static unsigned char *sRomData;
 static unsigned int sRomSize;
 
+#ifndef PORT_WASM_HOST
 /* ---- overlays ------------------------------------------------------------ */
 /*
  * Boot-time copy of each overlay's variables. The .bss range is copied as well rather than
@@ -226,6 +230,8 @@ void port_overlay_load(unsigned long long rom_start)
     }
     port_log("overlay at ROM 0x%llX is not in the overlay table", rom_start);
 }
+
+#endif
 
 unsigned int port_file_read(const char *path, void *data, unsigned int size)
 {

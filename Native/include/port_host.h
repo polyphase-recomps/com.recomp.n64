@@ -101,6 +101,9 @@ const unsigned char *n64_framebuffer(int *width, int *height);
 /* Non-zero when a GPU backend draws the game straight into the host's render target instead:
  * there is no framebuffer to show, and each host frame needs at least one game frame. */
 int n64_draws_to_screen(void);
+/* GPU backends: where the game's picture goes in the host's render target, in its pixels
+ * (resolution scaler). width <= 0 = the whole target. No effect with the software renderer. */
+void n64_set_display_rect(float x, float y, float width, float height);
 /* Interleaved stereo S16 samples produced by the last frame. */
 const short *n64_audio(int *frames, int *sample_rate);
 

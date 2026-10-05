@@ -114,3 +114,36 @@ ssb64_host --rom <rom> --frames 10000 --fuzz 34 --fuzz-until 8300 --bridge --req
 
 `--bridge` prints every event, the request's result, and all variables (before / after the
 request and at the end). `--request-at F "set <name> <value> [index]"` writes a variable.
+
+## Mod settings menu, `Recomp` / `Mods` Lua, resolution scaler
+
+The mod layer every recomp runtime shares is **com.recomp.mod.base** (a dependency of this
+package; see its README):
+
+- **Tools > Recomp > Mods > Mod Map Editor**: a Mod Map (asset) lists what players can
+  change or watch. **Import...** fills it from the running game, or without running
+  anything from the bridge tables in the game package's `Native/` sources.
+- **Tools > Recomp > Mods > Generate Mod Settings Scene...**: a gamepad settings menu built
+  from the map (tabs per group, Save / Reset / Close, Display page). Generating again
+  updates it and keeps your edits.
+- At runtime the player's choices are written to the game, kept ("lock" entries) and
+  saved (`Saves/<name>.mods`, GameCube memory card).
+- Lua `Recomp.*` works on any runtime; `Mods.*` reads and changes the settings.
+- The player node places its picture with the shared **resolution scaler**: Fit
+  (the console's real shape), Integer, Native, Full Screen, Scale ×N, sharp / smooth, and
+  window sizes on Windows.
+- **Tools > Recomp > Mods > Live Variables** shows and edits the running game's
+  variables: handy for finding cheats.
+
+On N64 the provider lives in the game addon (`com.recomp.ssb64/Source/N64Provider.cpp`,
+over `n64_bridge_*`). Variables can be read and set; floats travel as 16.16 in `set`.
+
+The GX renderer (Wii / GameCube) draws straight into the screen. The scaler gives it its
+place through the new host call `n64_set_display_rect(x, y, w, h)` (`port_host.h`): the
+backend maps the N64 viewport and scissor into that rectangle, and the rest of the frame
+stays the engine's. Game libraries built before this call existed still link (the addon
+calls it through a weak symbol) and fill the screen as before.
+
+The `N64` Lua table now goes through the engine's Lua wrappers. It used to call
+`luaL_newlib` on the addon's own copy of Lua, whose version check aborts the editor
+("multiple Lua VMs detected").

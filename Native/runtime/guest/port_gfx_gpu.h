@@ -318,6 +318,7 @@ static void gpu_triangle(s32 i0, s32 i1, s32 i2)
     {
         st.z_test = (sOtherModeL & Z_CMP) != 0;
         st.z_write = (sOtherModeL & Z_UPD) != 0;
+        st.decal = st.z_test && (sOtherModeL & ZMODE_DEC) == ZMODE_DEC;
     }
     st.ortho = sVtxOrtho;
     st.depth_k1 = sVtxDepthK1;

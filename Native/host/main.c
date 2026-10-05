@@ -209,7 +209,7 @@ int main(int argc, char **argv)
     double time_start, time_end;
     const char *wav_path = NULL;
     FILE *wav = NULL;
-    unsigned int wav_bytes = 0, audio_frames_total = 0;
+    unsigned int wav_bytes = 0, audio_frames_total = 0, wav_rate = 32000;
 
     for (i = 1; i < argc; i++)
     {
@@ -404,6 +404,10 @@ int main(int argc, char **argv)
             const short *pcm = n64_audio(&audio_frames, &audio_rate);
 
             audio_frames_total += audio_frames;
+            if (audio_frames > 0)
+            {
+                wav_rate = (unsigned int)audio_rate;
+            }
             if (wav != NULL && pcm != NULL && audio_frames > 0)
             {
                 /* WAV data is little-endian whatever the host is. */
@@ -435,14 +439,27 @@ int main(int argc, char **argv)
     time_end = now_ms();
     if (wav != NULL)
     {
-        unsigned int rate = 32000, byte_rate = rate * 4, riff = wav_bytes + 36, fmt_size = 16;
-        unsigned short pcm_tag = 1, channels = 2, align = 4, bits = 16;
+        /* The header is little-endian whatever the host is. */
+        unsigned char h[44];
+        unsigned int fields[6], k;
 
+        memcpy(h, "RIFF\0\0\0\0WAVEfmt \x10\0\0\0\x01\0\x02\0\0\0\0\0\0\0\0\0\x04\0\x10\0data\0\0\0\0", 44);
+        fields[0] = 4;  fields[1] = wav_bytes + 36;
+        fields[2] = 24; fields[3] = wav_rate;
+        fields[4] = 28; fields[5] = wav_rate * 4;
+        for (k = 0; k < 6; k += 2)
+        {
+            h[fields[k]] = (unsigned char)fields[k + 1];
+            h[fields[k] + 1] = (unsigned char)(fields[k + 1] >> 8);
+            h[fields[k] + 2] = (unsigned char)(fields[k + 1] >> 16);
+            h[fields[k] + 3] = (unsigned char)(fields[k + 1] >> 24);
+        }
+        h[40] = (unsigned char)wav_bytes;
+        h[41] = (unsigned char)(wav_bytes >> 8);
+        h[42] = (unsigned char)(wav_bytes >> 16);
+        h[43] = (unsigned char)(wav_bytes >> 24);
         fseek(wav, 0, SEEK_SET);
-        fwrite("RIFF", 1, 4, wav); fwrite(&riff, 4, 1, wav); fwrite("WAVEfmt ", 1, 8, wav);
-        fwrite(&fmt_size, 4, 1, wav); fwrite(&pcm_tag, 2, 1, wav); fwrite(&channels, 2, 1, wav);
-        fwrite(&rate, 4, 1, wav); fwrite(&byte_rate, 4, 1, wav); fwrite(&align, 2, 1, wav); fwrite(&bits, 2, 1, wav);
-        fwrite("data", 1, 4, wav); fwrite(&wav_bytes, 4, 1, wav);
+        fwrite(h, 1, sizeof(h), wav);
         fclose(wav);
     }
     printf("audio: %u sample frames (%.1f per video frame)\n", audio_frames_total,

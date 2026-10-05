@@ -26,6 +26,11 @@ void port_gpu_host_idle(void)
 {
 }
 
+void port_gpu_set_target_rect(float x, float y, float width, float height)
+{
+    (void)x, (void)y, (void)width, (void)height;
+}
+
 void port_gpu_viewport(float x, float y, float width, float height)
 {
 }

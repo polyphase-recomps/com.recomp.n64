@@ -65,6 +65,9 @@ typedef struct PortGpuState
      * API takes full clip-space positions can ignore these. */
     unsigned char ortho;
     float depth_k1, depth_k2;
+    /* N64 decal depth mode (shadows, marks on the ground): drawn level with what is already
+     * there, so the backend lets it win depth ties with a slight bias toward the eye. */
+    unsigned char decal;
 } PortGpuState;
 
 typedef struct PortGpuVtx
@@ -81,6 +84,10 @@ void port_gpu_frame_end(void);
  * happens on a game thread; a backend whose API is tied to "the thread that draws" hands it
  * back to the host here. */
 void port_gpu_host_idle(void);
+
+/* Where the N64 screen goes in the backend's render target, in its pixels (the host's
+ * resolution scaler: aspect / integer fit). width <= 0 = the whole target (default). */
+void port_gpu_set_target_rect(float x, float y, float width, float height);
 
 /* In N64 screen pixels (320 x 240, y down); scissor max is exclusive. */
 void port_gpu_viewport(float x, float y, float width, float height);

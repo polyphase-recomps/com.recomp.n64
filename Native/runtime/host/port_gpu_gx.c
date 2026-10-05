@@ -22,7 +22,8 @@
 #define VTXFMT GX_VTXFMT7 /* out of the way of whoever else draws with GX */
 
 /* ---- render target ---------------------------------------------------------- */
-static f32 sTargetW, sTargetH; /* EFB area the N64 screen maps to */
+static f32 sTargetX, sTargetY, sTargetW, sTargetH; /* EFB area the N64 screen maps to */
+static f32 sRect[4];  /* the host's choice (port_gpu_set_target_rect); w <= 0 = whole EFB */
 static GXRModeObj *sMode;
 static void *sFifo;
 
@@ -33,8 +34,19 @@ static void target_init(void)
     {
         sMode = VIDEO_GetPreferredMode(NULL);
     }
-    sTargetW = (f32)sMode->fbWidth;
-    sTargetH = (f32)sMode->efbHeight;
+    if (sRect[2] > 0.0f && sRect[3] > 0.0f)
+    {
+        sTargetX = sRect[0];
+        sTargetY = sRect[1];
+        sTargetW = sRect[2];
+        sTargetH = sRect[3];
+    }
+    else
+    {
+        sTargetX = sTargetY = 0.0f;
+        sTargetW = (f32)sMode->fbWidth;
+        sTargetH = (f32)sMode->efbHeight;
+    }
 }
 
 /* ---- cached GX state ---------------------------------------------------------- */
@@ -44,6 +56,7 @@ static f32 sViewport[4] = { -1.0f, -1.0f, -1.0f, -1.0f };
 static int sScissor[4] = { -1, -1, -1, -1 };
 static int sProjMode = -1; /* 0 perspective, 1 orthographic */
 static f32 sProjK1, sProjK2;
+static int sProjDecal;
 static int sVtxDescSet;
 
 /* ---- textures ------------------------------------------------------------------ */
@@ -65,7 +78,8 @@ typedef struct GxTex
 } GxTex;
 
 static unsigned int sDraws; /* draw calls this frame */
-static GxTex sTex[TEX_MAX];
+static GxTex sTex[TEX_MAX + 1]; /* the last slot holds the saved frame (SAVED_TEX) */
+#define SAVED_TEX (TEX_MAX + 1)
 static unsigned int sTexBytes;
 static unsigned int sFrame = 1;
 /*
@@ -438,11 +452,14 @@ static void apply_state(const PortGpuState *st)
     }
 }
 
-static void set_projection(int ortho, f32 k1, f32 k2)
+static void set_projection(int ortho, f32 k1, f32 k2, int decal)
 {
+    /* Decals: every depth scaled by (1 + this), i.e. 0.1% nearer the eye whatever the distance
+     * (GX depth runs from -1 at the near plane to 0 at the far one). */
+    const f32 decal_scale = decal ? 1.001f : 1.0f;
     Mtx44 proj;
 
-    if (ortho == sProjMode && (ortho || (k1 == sProjK1 && k2 == sProjK2)))
+    if (ortho == sProjMode && decal == sProjDecal && (ortho || (k1 == sProjK1 && k2 == sProjK2)))
     {
         return;
     }
@@ -452,22 +469,23 @@ static void set_projection(int ortho, f32 k1, f32 k2)
     if (ortho)
     {
         /* N64 depth -1..1 to the GX range -1..0 */
-        proj[2][2] = 0.5f;
-        proj[2][3] = -0.5f;
+        proj[2][2] = 0.5f * decal_scale;
+        proj[2][3] = -0.5f * decal_scale;
         proj[3][3] = 1.0f;
         GX_LoadProjectionMtx(proj, GX_ORTHOGRAPHIC);
     }
     else
     {
         /* eye z is -w: clip z = (k1 * w + k2 - w) / 2 */
-        proj[2][2] = (1.0f - k1) * 0.5f;
-        proj[2][3] = k2 * 0.5f;
+        proj[2][2] = (1.0f - k1) * 0.5f * decal_scale;
+        proj[2][3] = k2 * 0.5f * decal_scale;
         proj[3][2] = -1.0f;
         GX_LoadProjectionMtx(proj, GX_PERSPECTIVE);
     }
     sProjMode = ortho;
     sProjK1 = k1;
     sProjK2 = k2;
+    sProjDecal = decal;
 }
 
 static void set_vertex_format(void)
@@ -495,13 +513,110 @@ static void set_vertex_format(void)
     GX_SetAlphaUpdate(GX_TRUE);
 }
 
+/* Leave GX the way a host engine expects to find it for its own drawing: these are the
+ * settings engines tend to make once rather than per draw. */
+static void leave_gx_to_host(void)
+{
+    /* the whole EFB, whatever part of it the game's picture takes (target rect) */
+    GX_SetViewport(0.0f, 0.0f, (f32)sMode->fbWidth, (f32)sMode->efbHeight, 0.0f, 1.0f);
+    GX_SetScissor(0, 0, sMode->fbWidth, sMode->efbHeight);
+    GX_SetCullMode(GX_CULL_FRONT);
+    GX_SetAlphaCompare(GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0);
+    GX_SetZCompLoc(GX_TRUE);
+    GX_SetZMode(GX_TRUE, GX_LEQUAL, GX_TRUE);
+    GX_SetBlendMode(GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_CLEAR);
+    GX_SetColorUpdate(GX_TRUE);
+    GX_SetAlphaUpdate(GX_TRUE);
+    GX_SetCurrentMtx(GX_PNMTX0);
+    sStateValid = 0;
+    sViewport[2] = -1.0f;
+    sScissor[2] = -1;
+}
+
+/*
+ * Games that run below 60 frames per second draw on some video frames only, while whoever
+ * presents (the engine, host/main_ogc.c) clears the picture after every one. The last finished
+ * picture is kept as a texture and drawn again on the frames the game skips.
+ */
+static unsigned int sDrawsSinceIdle;
+static void *sSavedFrame;
+static u16 sSavedW, sSavedH;
+
+static void saved_frame_capture(void)
+{
+    /* the game's picture: the target rect, which the host may move or resize */
+    u16 width = (u16)sTargetW, height = (u16)sTargetH;
+    GxTex *tex = &sTex[SAVED_TEX - 1];
+
+    if (sSavedFrame != NULL && (width != sSavedW || height != sSavedH))
+    {
+        GX_DrawDone(); /* a queued redraw may still read it */
+        free(sSavedFrame);
+        sSavedFrame = NULL;
+    }
+    if (sSavedFrame == NULL)
+    {
+        sSavedW = width;
+        sSavedH = height;
+        sSavedFrame = memalign(32, GX_GetTexBufferSize(width, height, GX_TF_RGB565, GX_FALSE, 0));
+        if (sSavedFrame == NULL)
+        {
+            return;
+        }
+        GX_InitTexObj(&tex->obj, sSavedFrame, width, height, GX_TF_RGB565, GX_CLAMP, GX_CLAMP, GX_FALSE);
+        tex->wrap_s = tex->wrap_t = tex->filter = 0xFF;
+        tex->data = sSavedFrame;
+    }
+    GX_SetTexCopySrc((u16)sTargetX, (u16)sTargetY, width, height);
+    GX_SetTexCopyDst(width, height, GX_TF_RGB565, GX_FALSE);
+    GX_CopyTex(sSavedFrame, GX_FALSE);
+    GX_PixModeSync();
+    GX_InvalidateTexAll();
+    tex->hash = 1;
+}
+
+static void saved_frame_draw(void)
+{
+    PortGpuState st;
+    PortGpuVtx v[4];
+    int i;
+
+    memset(&st, 0, sizeof(st));
+    st.cycles = 1;
+    st.cycle[0].d = PORT_GPU_IN_TEXEL;
+    st.cycle[0].ad = PORT_GPU_IN_ONE;
+    st.texture = SAVED_TEX;
+    st.wrap_s = st.wrap_t = PORT_GPU_WRAP_CLAMP;
+    st.ortho = 1;
+    for (i = 0; i < 4; i++)
+    {
+        int right = (i == 1 || i == 2), bottom = (i >= 2);
+
+        v[i].x = right ? 1.0f : -1.0f;
+        v[i].y = bottom ? -1.0f : 1.0f;
+        v[i].z = 0.0f;
+        v[i].w = 1.0f;
+        v[i].s = right ? 1.0f : 0.0f;
+        v[i].t = bottom ? 1.0f : 0.0f;
+        v[i].r = v[i].g = v[i].b = v[i].a = 255;
+    }
+    /* GX holds whatever the host drew with: set everything up again */
+    sStateValid = 0;
+    sVtxDescSet = 0;
+    sProjMode = -1;
+    sViewport[2] = -1.0f;
+    sScissor[2] = -1;
+    port_gpu_viewport(0.0f, 0.0f, N64_W, N64_H);
+    port_gpu_scissor(0, 0, (int)N64_W, (int)N64_H);
+    port_gpu_draw(&st, v, 4);
+    leave_gx_to_host();
+}
+
 /* ---- interface ------------------------------------------------------------------ */
 void port_gpu_frame_begin(void)
 {
-    if (sTargetW == 0.0f)
-    {
-        target_init();
-    }
+    /* every frame: the host may have moved the picture (resolution scaler) */
+    target_init();
     /* libogc throttles the command FIFO by suspending "the GX thread" when it fills up. That
      * has to be the thread that is writing commands, which is this game thread now. */
     GX_SetCurrentGXThread();
@@ -528,27 +643,26 @@ void port_gpu_frame_end(void)
         }
         sStatCreates = sStatSyncs = sStatFails = sStatEvicts = 0;
     }
-    /* Leave GX the way a host engine expects to find it for its own drawing: these are the
-     * settings engines tend to make once rather than per draw. */
-    GX_SetViewport(0.0f, 0.0f, sTargetW, sTargetH, 0.0f, 1.0f);
-    GX_SetScissor(0, 0, (u32)sTargetW, (u32)sTargetH);
-    GX_SetCullMode(GX_CULL_FRONT);
-    GX_SetAlphaCompare(GX_ALWAYS, 0, GX_AOP_AND, GX_ALWAYS, 0);
-    GX_SetZCompLoc(GX_TRUE);
-    GX_SetZMode(GX_TRUE, GX_LEQUAL, GX_TRUE);
-    GX_SetBlendMode(GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_CLEAR);
-    GX_SetColorUpdate(GX_TRUE);
-    GX_SetAlphaUpdate(GX_TRUE);
-    GX_SetCurrentMtx(GX_PNMTX0);
-    sStateValid = 0;
-    sViewport[2] = -1.0f;
-    sScissor[2] = -1;
+    leave_gx_to_host();
 }
 
 void port_gpu_host_idle(void)
 {
     /* Back on the host thread: it is the one that draws (and presents) from here on. */
     GX_SetCurrentGXThread();
+    if (sTargetW == 0.0f)
+    {
+        return; /* nothing drawn yet */
+    }
+    if (sDrawsSinceIdle != 0)
+    {
+        saved_frame_capture();
+    }
+    else if (sSavedFrame != NULL)
+    {
+        saved_frame_draw();
+    }
+    sDrawsSinceIdle = 0;
 }
 
 void port_gpu_viewport(float x, float y, float width, float height)
@@ -560,7 +674,17 @@ void port_gpu_viewport(float x, float y, float width, float height)
         return;
     }
     sViewport[0] = x; sViewport[1] = y; sViewport[2] = width; sViewport[3] = height;
-    GX_SetViewport(x * sx, y * sy, width * sx, height * sy, 0.0f, 1.0f);
+    GX_SetViewport(sTargetX + x * sx, sTargetY + y * sy, width * sx, height * sy, 0.0f, 1.0f);
+}
+
+void port_gpu_set_target_rect(float x, float y, float width, float height)
+{
+    sRect[0] = x;
+    sRect[1] = y;
+    sRect[2] = width;
+    sRect[3] = height;
+    sViewport[2] = -1.0f; /* re-send viewport and scissor */
+    sScissor[2] = -1;
 }
 
 void port_gpu_scissor(int x0, int y0, int x1, int y1)
@@ -574,7 +698,7 @@ void port_gpu_scissor(int x0, int y0, int x1, int y1)
     sScissor[0] = x0; sScissor[1] = y0; sScissor[2] = x1; sScissor[3] = y1;
     if (x1 < x0) x1 = x0;
     if (y1 < y0) y1 = y0;
-    GX_SetScissor((u32)(x0 * sx), (u32)(y0 * sy), (u32)((x1 - x0) * sx), (u32)((y1 - y0) * sy));
+    GX_SetScissor((u32)(sTargetX + x0 * sx), (u32)(sTargetY + y0 * sy), (u32)((x1 - x0) * sx), (u32)((y1 - y0) * sy));
 }
 
 void port_gpu_draw(const PortGpuState *state, const PortGpuVtx *vtx, int count)
@@ -582,6 +706,7 @@ void port_gpu_draw(const PortGpuState *state, const PortGpuVtx *vtx, int count)
     int i;
 
     sDraws++;
+    sDrawsSinceIdle++;
 
     set_vertex_format();
     if (!sStateValid || memcmp(state, &sState, sizeof(sState)) != 0)
@@ -595,7 +720,7 @@ void port_gpu_draw(const PortGpuState *state, const PortGpuVtx *vtx, int count)
         sTex[state->texture - 1].used = sFrame;
         sTex[state->texture - 1].serial = sDrawSerial + 1;
     }
-    set_projection(state->ortho, state->depth_k1, state->depth_k2);
+    set_projection(state->ortho, state->depth_k1, state->depth_k2, state->decal);
 
     sDrawSerial++;
     GX_Begin((count == 4) ? GX_TRIANGLEFAN : GX_TRIANGLES, VTXFMT, (u16)count);
@@ -698,7 +823,7 @@ void port_gpu_gx_read_frame(unsigned char *rgb)
     {
         sCopy = memalign(32, 320 * 240 * 4);
     }
-    GX_SetTexCopySrc(0, 0, (u16)sTargetW, (u16)sTargetH);
+    GX_SetTexCopySrc((u16)sTargetX, (u16)sTargetY, (u16)sTargetW, (u16)sTargetH);
     GX_SetTexCopyDst((u16)(sTargetW / 2), (u16)(sTargetH / 2), GX_TF_RGBA8, GX_TRUE);
     GX_CopyTex(sCopy, GX_FALSE);
     GX_PixModeSync();

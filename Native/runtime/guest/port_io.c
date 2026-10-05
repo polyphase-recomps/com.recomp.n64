@@ -143,7 +143,102 @@ s32 osEPiStartDma(OSPiHandle *handle, OSIoMesg *mb, s32 direction)
     return 0;
 }
 
+/* Same as osEPiStartDma on the cartridge (the PI manager's own handle). */
+s32 osPiStartDma(OSIoMesg *mb, s32 priority, s32 direction, u32 devAddr, void *dramAddr, u32 size, OSMesgQueue *mq)
+{
+    mb->hdr.pri = priority;
+    mb->hdr.retQueue = mq;
+    mb->devAddr = devAddr;
+    mb->dramAddr = dramAddr;
+    mb->size = size;
+    return osEPiStartDma(osCartRomInit(), mb, direction);
+}
+
+/* 64DD drive ROM: there is no drive; reads through this handle go to the cartridge ROM. */
+OSPiHandle *osDriveRomInit(void)
+{
+    static OSPiHandle sDriveHandle;
+
+    sDriveHandle.type = DEVICE_TYPE_CART;
+    return &sDriveHandle;
+}
+
+/* ---- EEPROM (kept in the save image, after nothing else uses it: games have one kind) ---- */
+#ifndef PORT_EEPROM_TYPE
+#define PORT_EEPROM_TYPE EEPROM_TYPE_4K
+#endif
+
+s32 osEepromProbe(OSMesgQueue *mq)
+{
+    return PORT_EEPROM_TYPE;
+}
+
+s32 osEepromLongRead(OSMesgQueue *mq, u8 address, u8 *buffer, int nbytes)
+{
+    u32 offset = (u32)address * EEPROM_BLOCK_SIZE;
+
+    if (offset + (u32)nbytes > EEP16K_MAXBLOCKS * EEPROM_BLOCK_SIZE)
+    {
+        return -1;
+    }
+    port_memcpy(buffer, sSram + offset, nbytes);
+    return 0;
+}
+
+s32 osEepromLongWrite(OSMesgQueue *mq, u8 address, u8 *buffer, int nbytes)
+{
+    u32 offset = (u32)address * EEPROM_BLOCK_SIZE;
+
+    if (offset + (u32)nbytes > EEP16K_MAXBLOCKS * EEPROM_BLOCK_SIZE)
+    {
+        return -1;
+    }
+    port_memcpy(sSram + offset, buffer, nbytes);
+    sSramDirty = TRUE;
+    return 0;
+}
+
+s32 osEepromRead(OSMesgQueue *mq, u8 address, u8 *buffer)
+{
+    return osEepromLongRead(mq, address, buffer, EEPROM_BLOCK_SIZE);
+}
+
+s32 osEepromWrite(OSMesgQueue *mq, u8 address, u8 *buffer)
+{
+    return osEepromLongWrite(mq, address, buffer, EEPROM_BLOCK_SIZE);
+}
+
+/* ---- Controller Pak: none inserted ------------------------------------------------- */
+s32 osPfsInitPak(OSMesgQueue *mq, OSPfs *pfs, int channel) { return PFS_ERR_NOPACK; }
+s32 osPfsNumFiles(OSPfs *pfs, s32 *max_files, s32 *files_used) { return PFS_ERR_NOPACK; }
+s32 osPfsFreeBlocks(OSPfs *pfs, s32 *bytes_not_used) { return PFS_ERR_NOPACK; }
+s32 osPfsFileState(OSPfs *pfs, s32 file_no, OSPfsState *state) { return PFS_ERR_NOPACK; }
+s32 osPfsFindFile(OSPfs *pfs, u16 company_code, u32 game_code, u8 *game_name, u8 *ext_name, s32 *file_no)
+{
+    return PFS_ERR_NOPACK;
+}
+s32 osPfsAllocateFile(OSPfs *pfs, u16 company_code, u32 game_code, u8 *game_name, u8 *ext_name, int file_size,
+                      s32 *file_no)
+{
+    return PFS_ERR_NOPACK;
+}
+s32 osPfsDeleteFile(OSPfs *pfs, u16 company_code, u32 game_code, u8 *game_name, u8 *ext_name)
+{
+    return PFS_ERR_NOPACK;
+}
+s32 osPfsReadWriteFile(OSPfs *pfs, s32 file_no, u8 flag, int offset, int size_in_bytes, u8 *data_buffer)
+{
+    return PFS_ERR_NOPACK;
+}
+
 /* ---- VI ------------------------------------------------------------------------- */
+/* The modes only matter to the VI hardware; osViSetMode takes them and ignores them. */
+OSViMode osViModeTable[56];
+
+void osViSetSpecialFeatures(u32 func)
+{
+}
+
 static void *sViCurrentFb;
 static void *sViNextFb;
 
@@ -212,8 +307,12 @@ OSTime osGetTime(void)
 }
 
 /* ---- SP tasks ---------------------------------------------------------------------- */
+/* Microcode images: only their addresses are used, to tell tasks apart (port_gfx_run_task). */
 long long int gspF3DEX2_fifoTextStart[1], gspF3DEX2_fifoDataStart[1];
+long long int gspS2DEX_fifoTextStart[1], gspS2DEX_fifoDataStart[1];
 long long int n_aspMainTextStart[1], n_aspMainDataStart[1];
+long long int aspMainTextStart[1], aspMainDataStart[1];
+long long int rspbootTextStart[1], rspbootTextEnd[1];
 
 void osSpTaskLoad(OSTask *task)
 {
@@ -252,7 +351,17 @@ s32 osDpSetNextBuffer(void *buf, u64 size)
 /* ---- AI ---------------------------------------------------------------------------- */
 s32 osAiSetFrequency(u32 frequency)
 {
-    return frequency;
+    /* The DAC rate the hardware ends up with from the game's request (NTSC video clock). */
+    u32 dacRate = (u32)(48681812.0F / frequency + 0.5F);
+    u32 rate = (dacRate != 0) ? 48681812 / dacRate : frequency;
+
+    port_audio_set_rate(rate);
+    return (s32)rate;
+}
+
+u32 osAiGetLength(void)
+{
+    return port_audio_ai_length();
 }
 
 s32 osAiSetNextBuffer(void *buf, u32 size)
@@ -345,12 +454,13 @@ s32 __osMotorAccess(OSPfs *pfs, s32 start)
 extern float sinf(float);
 extern float cosf(float);
 
-f32 __sinf(f32 x)
+/* For games that do not link libultra's own (weak: those that do keep theirs). */
+__attribute__((weak)) f32 __sinf(f32 x)
 {
     return sinf(x);
 }
 
-f32 __cosf(f32 x)
+__attribute__((weak)) f32 __cosf(f32 x)
 {
     return cosf(x);
 }
