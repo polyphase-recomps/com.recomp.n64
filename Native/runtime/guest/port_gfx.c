@@ -869,13 +869,20 @@ static void to_screen(PortScreenVtx *out, const PortVtx *v)
 
 static int sProfSkip = -1; /* N64_PROF_SKIP (see osSpTaskStartGo in port_io.c) */
 
-static void raster_triangle(const PortScreenVtx *v0, const PortScreenVtx *v1, const PortScreenVtx *v2)
+/* Read on first use by whichever draw comes first: a screen with no triangles (the N64 logo)
+ * still has its fill rectangles tested against it, and -1 has every bit set. */
+static int gfx_prof_skip(void)
 {
     if (sProfSkip < 0)
     {
         sProfSkip = port_env_int("N64_PROF_SKIP");
     }
-    if (sProfSkip & 4)
+    return sProfSkip;
+}
+
+static void raster_triangle(const PortScreenVtx *v0, const PortScreenVtx *v1, const PortScreenVtx *v2)
+{
+    if (gfx_prof_skip() & 4)
     {
         return;
     }
@@ -1019,7 +1026,7 @@ static void gfx_triangle(s32 i0, s32 i1, s32 i2)
 /* ---- rectangles ------------------------------------------------------------------------- */
 static void gfx_fill_rect(u32 w0, u32 w1)
 {
-    if (sProfSkip & 8)
+    if (gfx_prof_skip() & 8)
     {
         return;
     }
