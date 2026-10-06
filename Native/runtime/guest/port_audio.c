@@ -12,14 +12,39 @@
  *    the audio heap, so an address is an offset into it (see osVirtualToPhysical in port_io.c).
  *  - Finished buffers go to a queue the host drains once per video frame; a virtual AI FIFO
  *    reports how much is "still playing" so the driver's rate control behaves as on hardware.
+ *
+ * Recomp mode (PORT_RSP_HOST + PORT_RSP_RECOMP, runtime/recomp) compiles only the command
+ * interpreter and the output queue, as native code over the recompiled game's RDRAM (its
+ * word-swapped layout, port_gmem.h). Nothing is converted there: commands carry physical
+ * addresses, game data (ADPCM bytes, codebooks, loop states, mixed output) is read and written
+ * big-endian through the accessors, and DMEM holds native 16-bit samples (bytes at offset ^ 1).
+ * The microcode's own state records stay in host order: only it reads them back.
  */
 #include <port_types.h>
 #include <PR/os.h>
 #include <PR/libaudio.h>
 #include <PR/abi.h>
 #include <port_host.h>
+#if !defined(PORT_RSP_RECOMP)
 #include <port_game.h>
+#endif
 #include "port_guest.h"
+
+#if defined(PORT_RSP_RECOMP)
+#include "port_gmem.h"
+
+static u32 sCurW0, sCurW1; /* command being executed, for diagnostics */
+
+/* 24-bit physical address -> RDRAM (state records are word aligned, so host order holds) */
+static u8 *audio_ram(u32 addr)
+{
+    return gRecompRdram + (addr & 0x00FFFFFF);
+}
+
+#define DMEM_BYTE(offset) ((offset) ^ 1)
+#define RAM_BYTE(p) (*(u8 *)((uintptr_t)(p) ^ 3))
+#else
+#define DMEM_BYTE(offset) (offset)
 
 /* ---- addresses -------------------------------------------------------------------- */
 /* Offset 0 must stay distinguishable from NULL. */
@@ -357,6 +382,7 @@ uintptr_t *port_audio_load_fgm_params(uintptr_t start, uintptr_t end, s32 *count
     }
     return (uintptr_t *)records;
 }
+#endif /* !PORT_RSP_RECOMP */
 
 /* ---- n_aspMain command list ------------------------------------------------------------------ */
 #define NAUDIO_COUNT     0x170 /* bytes of one channel per pass: 184 samples */
@@ -398,6 +424,18 @@ static void acmd_adpcm(u32 w0, u32 w1)
     }
     else
     {
+#if defined(PORT_RSP_RECOMP)
+        if (flags & A_LOOP)
+        {
+            const u8 *loop = audio_ram(sLoopAddr); /* game data: the wave's loop state */
+
+            for (i = 0; i < 16; i++)
+            {
+                last[i] = GM_S16(loop + i * 2);
+            }
+        }
+        else
+#endif
         port_memcpy(last, (flags & A_LOOP) ? audio_ram(sLoopAddr) : state, sizeof(last));
     }
     port_memcpy(DMEM16(dmemo), last, sizeof(last));
@@ -405,7 +443,7 @@ static void acmd_adpcm(u32 w0, u32 w1)
 
     while (count > 0)
     {
-        u8 code = sDmem[dmemi++ & (DMEM_SIZE - 1)];
+        u8 code = sDmem[DMEM_BYTE(dmemi++ & (DMEM_SIZE - 1))];
         u32 scale = code >> 4;
         const s16 *book1 = sBook + ((code & 0xF) << 4), *book2 = book1 + 8;
         u32 rshift = (scale < 12) ? 12 - scale : 0;
@@ -414,7 +452,7 @@ static void acmd_adpcm(u32 w0, u32 w1)
 
         for (i = 0; i < 8; i++)
         {
-            u8 byte = sDmem[dmemi++ & (DMEM_SIZE - 1)];
+            u8 byte = sDmem[DMEM_BYTE(dmemi++ & (DMEM_SIZE - 1))];
 
             frame[i * 2] = (s16)((s16)((byte & 0xF0) << 8) >> rshift);
             frame[i * 2 + 1] = (s16)((s16)((byte & 0x0F) << 12) >> rshift);
@@ -620,6 +658,21 @@ static void acmd_polef(u32 w0, u32 w1)
     port_memcpy(state + 6, &l2, sizeof(l2));
 }
 
+/* N64_AUDIO_TRACE=T: log the commands of tasks T..T+3 (bring-up aid) */
+static s32 sTraceFrom = -2;
+static u32 sTaskCount;
+
+static void trace_begin_task(void)
+{
+    if (sTraceFrom == -2)
+    {
+        s32 from = port_env_int("N64_AUDIO_TRACE");
+
+        sTraceFrom = (from > 0) ? from : -1;
+    }
+    sTaskCount++;
+}
+
 static void resample_lut_init(void)
 {
     s32 i;
@@ -636,6 +689,37 @@ static void resample_lut_init(void)
     }
 }
 
+#if defined(PORT_RSP_RECOMP)
+void port_audio_run_guest_abi1(u32 cmds, u32 count);
+
+static sb32 sAbi1; /* the game's audio microcode is aspMain (ABI 1), not n_aspMain */
+
+void port_audio_set_abi1(int abi1)
+{
+    sAbi1 = abi1 != 0;
+}
+
+/* The game's osSpTaskStartGo hands over an audio task (OSTask) by its address. */
+void port_audio_run_guest_task(u32 task)
+{
+    const u8 *t = audio_ram(task);
+    u32 data = GM_U32(t + 48), count = GM_U32(t + 52) / 8, i; /* t.data_ptr, t.data_size */
+
+    if (sResampleLut[0][1] == 0)
+    {
+        resample_lut_init();
+    }
+    trace_begin_task();
+    if (sAbi1)
+    {
+        port_audio_run_guest_abi1(data, count);
+        return;
+    }
+    for (i = 0; i < count; i++)
+    {
+        const u8 *cmd = audio_ram(data + i * 8);
+        u32 w0 = GM_U32(cmd), w1 = GM_U32(cmd + 4);
+#else
 extern long long int aspMainTextStart[];
 
 void port_audio_run_task(OSTask *task)
@@ -647,6 +731,7 @@ void port_audio_run_task(OSTask *task)
     {
         resample_lut_init();
     }
+    trace_begin_task();
     if (task->t.ucode == (u64 *)aspMainTextStart)
     {
         port_audio_abi1_run(cmd, count);
@@ -655,9 +740,14 @@ void port_audio_run_task(OSTask *task)
     for (i = 0; i < count; i++, cmd++)
     {
         u32 w0 = cmd->words.w0, w1 = cmd->words.w1;
+#endif
 
         sCurW0 = w0;
         sCurW1 = w1;
+        if (sTraceFrom >= 0 && sTaskCount >= (u32)sTraceFrom && sTaskCount < (u32)sTraceFrom + 4)
+        {
+            port_log("acmd: task %u cmd %u %08X %08X", sTaskCount, i, w0, w1);
+        }
 
         switch (w0 >> 24)
         {
@@ -688,6 +778,23 @@ void port_audio_run_task(OSTask *task)
             {
                 size = DMEM_SIZE - dmem;
             }
+#if defined(PORT_RSP_RECOMP)
+            {
+                u32 k;
+
+                for (k = 0; k < size; k++)
+                {
+                    if ((w0 >> 24) == A_LOADBUFF)
+                    {
+                        sDmem[DMEM_BYTE(dmem + k)] = GM_U8(ram + k);
+                    }
+                    else
+                    {
+                        RAM_BYTE(ram + k) = sDmem[DMEM_BYTE(dmem + k)];
+                    }
+                }
+            }
+#else
             if ((w0 >> 24) == A_LOADBUFF)
             {
                 port_memcpy(sDmem + dmem, ram, size);
@@ -696,6 +803,7 @@ void port_audio_run_task(OSTask *task)
             {
                 port_memcpy(ram, sDmem + dmem, size);
             }
+#endif
             break;
         }
         case A_RESAMPLE:
@@ -712,8 +820,12 @@ void port_audio_run_task(OSTask *task)
 
             if (size > DMEM_SIZE - dmemi) size = DMEM_SIZE - dmemi;
             if (size > DMEM_SIZE - dmemo) size = DMEM_SIZE - dmemo;
-            for (k = 0; k < size; k++) tmp[k] = sDmem[dmemi + k]; /* the ranges may overlap */
+            for (k = 0; k < size; k++) tmp[k] = sDmem[DMEM_BYTE(dmemi + k)]; /* the ranges may overlap */
+#if defined(PORT_RSP_RECOMP)
+            for (k = 0; k < size; k++) sDmem[DMEM_BYTE(dmemo + k)] = tmp[k];
+#else
             port_memcpy(sDmem + dmemo, tmp, size);
+#endif
             break;
         }
         case A_LOADADPCM:
@@ -724,7 +836,19 @@ void port_audio_run_task(OSTask *task)
             {
                 size = sizeof(sBook);
             }
+#if defined(PORT_RSP_RECOMP)
+            {
+                const u8 *book = audio_ram(w1); /* game data */
+                u32 k;
+
+                for (k = 0; k < size / 2; k++)
+                {
+                    sBook[k] = GM_S16(book + k * 2);
+                }
+            }
+#else
             port_memcpy(sBook, audio_ram(w1), size);
+#endif
             break;
         }
         case A_MIXER:
@@ -799,6 +923,27 @@ void port_audio_submit(void *samples, u32 size)
     port_memcpy(&sOut[sOutFrames * 2], samples, (unsigned long long)frames * 4);
     sOutFrames += frames;
 }
+
+#if defined(PORT_RSP_RECOMP)
+/* osAiSetNextBuffer: big-endian stereo frames at a physical address in RDRAM */
+void port_audio_submit_guest(u32 addr, u32 size)
+{
+    static s16 sNative[PORT_AUDIO_OUT_FRAMES * 2];
+    const u8 *src = audio_ram(addr & ~1u);
+    u32 i, count;
+
+    if (size / 4 > PORT_AUDIO_OUT_FRAMES)
+    {
+        size = PORT_AUDIO_OUT_FRAMES * 4;
+    }
+    count = size / 2;
+    for (i = 0; i < count; i++)
+    {
+        sNative[i] = GM_S16(src + i * 2);
+    }
+    port_audio_submit(sNative, size);
+}
+#endif
 
 /* Bytes left in the buffer being played, as AI_LEN_REG reports them. */
 u32 port_audio_ai_length(void)

@@ -35,6 +35,11 @@ typedef struct
 #endif
 
 /* The two words of a display list command */
+#if defined(PORT_RSP_RECOMP)
+/* the game's own display lists: two 32-bit words a command (a decomp's headers compiled with
+ * PORT would widen them for the native port) */
+_Static_assert(sizeof(Gfx) == 8, "recomp mode needs the N64's Gfx layout (compile without PORT)");
+#endif
 #ifdef PORT_RSP_HOST
 #define DL_W0(d) GM_U32(&(d)->words.w0)
 #define DL_W1(d) ((uintptr_t)GM_U32(&(d)->words.w1))
@@ -309,11 +314,11 @@ static void gfx_vertices(u32 w0, uintptr_t w1)
         v->w = x * sMP[0][3] + y * sMP[1][3] + z * sMP[2][3] + sMP[3][3];
         v->s = (f32)GM_S16(&src->v.tc[0]) * sTextureScaleS / 32.0F;
         v->t = (f32)GM_S16(&src->v.tc[1]) * sTextureScaleT / 32.0F;
-        v->a = src->v.cn[3];
+        v->a = GM_U8(&src->v.cn[3]);
 
         if (sGeometryMode & G_LIGHTING)
         {
-            f32 nx = src->n.n[0], ny = src->n.n[1], nz = src->n.n[2];
+            f32 nx = GM_S8(&src->n.n[0]), ny = GM_S8(&src->n.n[1]), nz = GM_S8(&src->n.n[2]);
             f32 tx = nx * mv[0][0] + ny * mv[1][0] + nz * mv[2][0];
             f32 ty = nx * mv[0][1] + ny * mv[1][1] + nz * mv[2][1];
             f32 tz = nx * mv[0][2] + ny * mv[1][2] + nz * mv[2][2];
@@ -346,9 +351,9 @@ static void gfx_vertices(u32 w0, uintptr_t w1)
         }
         else
         {
-            v->r = src->v.cn[0];
-            v->g = src->v.cn[1];
-            v->b = src->v.cn[2];
+            v->r = GM_U8(&src->v.cn[0]);
+            v->g = GM_U8(&src->v.cn[1]);
+            v->b = GM_U8(&src->v.cn[2]);
         }
     }
 #ifdef PORT_GFX_GPU
@@ -445,6 +450,16 @@ static sb32 tmem_region_sig(u32 start, u32 end, u32 *sig)
 
 static void gfx_copy_texels(u8 *dst, const u8 *src, u32 bytes)
 {
+#if GM_SWAPPED
+    /* bytes come out of their words in big-endian order */
+    u32 i;
+
+    for (i = 0; i < bytes; i++)
+    {
+        dst[i] = GM_U8(src + i);
+    }
+    return;
+#endif
 #ifdef PORT_LITTLE_ENDIAN
     if (sTimgSiz == G_IM_SIZ_16b && port_asset_elem_size(src) == 2)
     {
@@ -556,8 +571,8 @@ static void gfx_load_tlut(u32 w1)
     {
         if (is_bytes)
         {
-            sTmem[dst] = src[i * 2];
-            sTmem[dst + 1] = src[i * 2 + 1];
+            sTmem[dst] = GM_U8(src + i * 2);
+            sTmem[dst + 1] = GM_U8(src + i * 2 + 1);
         }
         else
         {
@@ -1149,12 +1164,12 @@ static void gfx_move_mem(u32 w0, uintptr_t w1)
 
         if (slot >= 0 && slot < 9)
         {
-            f32 x = light->l.dir[0], y = light->l.dir[1], z = light->l.dir[2];
+            f32 x = GM_S8(&light->l.dir[0]), y = GM_S8(&light->l.dir[1]), z = GM_S8(&light->l.dir[2]);
             f32 len = sqrtf(x * x + y * y + z * z);
 
-            sLightColor[slot][0] = light->l.col[0];
-            sLightColor[slot][1] = light->l.col[1];
-            sLightColor[slot][2] = light->l.col[2];
+            sLightColor[slot][0] = GM_U8(&light->l.col[0]);
+            sLightColor[slot][1] = GM_U8(&light->l.col[1]);
+            sLightColor[slot][2] = GM_U8(&light->l.col[2]);
             if (len > 0.0F)
             {
                 x /= len; y /= len; z /= len;

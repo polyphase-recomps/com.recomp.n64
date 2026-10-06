@@ -39,7 +39,22 @@ static s16 clamp16(s32 value)
 /* RDRAM <-> DMEM (dmem and size are multiples of 4) */
 static void dmem_transfer(u32 dmem, u8 *ram, u32 size, sb32 load)
 {
-#if DMEM_SWAPPED
+#if GM_SWAPPED
+    /* recomp RDRAM: word-swapped, so go byte by byte through the layout */
+    u32 i;
+
+    for (i = 0; i < size; i++)
+    {
+        if (load)
+        {
+            sDmem[DMEM_BYTE(dmem + i)] = GM_U8(ram + i);
+        }
+        else
+        {
+            *(u8 *)((uintptr_t)(ram + i) ^ 3) = sDmem[DMEM_BYTE(dmem + i)];
+        }
+    }
+#elif DMEM_SWAPPED
     u32 i;
 
     for (i = 0; i < size; i += 2)

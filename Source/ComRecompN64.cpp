@@ -44,13 +44,15 @@ static void RegisterScriptFuncs(lua_State* L)
 #if EDITOR
 static EditorUIHooks* sHooks = nullptr;
 
-// Builds the game packages for the platform being packaged unless the profile turned it
-// off (Target Options); a failure cancels the build.
+// Builds the game packages for the platform being packaged, in the profile's Build mode, unless
+// the profile turned it off (Target Options); a failure cancels the build.
 static bool OnPreBuild(int32_t platform, void* userData)
 {
     (void)userData;
     char value[8] = "";
     char decomp[512] = "";
+    char mode[16] = "";
+    char rom[512] = "";
 
     if (sHooks != nullptr && sHooks->GetBuildSetting != nullptr)
     {
@@ -59,8 +61,10 @@ static bool OnPreBuild(int32_t platform, void* userData)
             return true;
         }
         sHooks->GetBuildSetting(N64Dependencies::kDecompOption, decomp, sizeof(decomp));
+        sHooks->GetBuildSetting(N64Dependencies::kModeOption, mode, sizeof(mode));
+        sHooks->GetBuildSetting(N64Dependencies::kRomOption, rom, sizeof(rom));
     }
-    if (!N64Dependencies::SetupAll(platform, decomp))
+    if (!N64Dependencies::SetupAll(platform, {decomp, mode, rom}))
     {
         if (sEngineAPI && sEngineAPI->LogError)
         {
@@ -83,7 +87,7 @@ static void RegisterEditorUI(EditorUIHooks* hooks, uint64_t hookId)
     {
         // engines without Target Options sections for every target
         hooks->AddMenuItem(hookId, "Developer", "N64/Setup Dependencies (Windows)",
-            [](void*) { N64Dependencies::SetupAllAsync(0, nullptr); }, nullptr, nullptr);
+            [](void*) { N64Dependencies::SetupAllAsync(0, {nullptr, nullptr, nullptr}); }, nullptr, nullptr);
     }
     hooks->RegisterOnPreBuild(hookId, OnPreBuild, nullptr);
     N64Dependencies::CheckReady();

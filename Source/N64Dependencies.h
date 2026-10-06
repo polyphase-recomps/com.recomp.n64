@@ -1,13 +1,19 @@
 /**
  * @file N64Dependencies.h
- * @brief Editor side of the N64 game packages: "Setup Dependencies" runs each game's native
- *        build (Native/build.ps1, Native/build-console.ps1), which compiles the game library
- *        the game's addon links and cuts the asset pack out of the user's ROM.
+ * @brief Editor side of the N64 game packages: "Setup Dependencies" builds the game library
+ *        each game's addon links, in the build profile's Build mode:
  *
- * Game packages are Packages/<id>/Native folders whose CMakeLists.txt uses N64Port.cmake.
- * The setup runs before packaging for the platform being packaged (pre-build hook; a
- * failure cancels the build) unless the build profile turns it off, and on demand from the
- * profile's Target Options in the Packaging window. Same model as com.recomp.ps1.
+ *   Decomp (default)  the game's native build (Native/build.ps1, Native/build-console.ps1)
+ *                     compiles the decomp and cuts the asset pack out of the user's ROM.
+ *   Recomp            com.recomp.n64's Native/tools/recomp/build_recomp.ps1 recompiles the
+ *                     user's ROM with N64Recomp (the game package's Recomp/ config) and builds
+ *                     it on the recomp runtime. Windows only so far.
+ *
+ * Game packages are Packages/<id> folders with Native/CMakeLists.txt using N64Port.cmake
+ * (decomp) and/or Recomp/CMakeLists.txt using N64Recomp.cmake (recomp). The setup runs before
+ * packaging for the platform being packaged (pre-build hook; a failure cancels the build)
+ * unless the build profile turns it off, and on demand from the profile's Target Options in the
+ * Packaging window. Same model as com.recomp.ps1.
  */
 #pragma once
 
@@ -20,12 +26,22 @@ namespace N64Dependencies
 // Build profile options (Target Options).
 constexpr const char* kSetupOption = "n64.setupDependencies"; // "1" (default) runs the setup before packaging
 constexpr const char* kDecompOption = "n64.decompDir";        // decomp checkout; empty = the game package's default
+constexpr const char* kModeOption = "n64.buildMode";          // "decomp" (default) or "recomp"
+constexpr const char* kRomOption = "n64.romPath";             // recomp: the user's .z64; empty = the game's toml default
+
+// What a setup builds: the profile's Build mode and its inputs (any may be null or empty).
+struct Options
+{
+    const char* decompDir;
+    const char* mode;
+    const char* romPath;
+};
 
 // Builds every game package for a platform (Platform enum value) now, logging the output.
-// False if one failed. `decompDir` may be null or empty.
-bool SetupAll(int32_t platform, const char* decompDir);
+// False if one failed.
+bool SetupAll(int32_t platform, const Options& options);
 // Same on a background thread; output and the result show in the log.
-void SetupAllAsync(int32_t platform, const char* decompDir);
+void SetupAllAsync(int32_t platform, const Options& options);
 // Editor tick: writes queued output of a background setup to the log.
 void Tick();
 // Logs which game packages have no library for the editor's platform yet.

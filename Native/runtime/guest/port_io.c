@@ -290,20 +290,35 @@ void port_io_frame_begin(void)
 #define PORT_COUNTS_PER_READ 1543
 
 static u64 sClockReads;
+static s32 sClockTraceFrames = -1; /* N64_CLOCK_TRACE=N: log every clock read of the first N frames */
 
-static u64 port_clock(void)
+static u64 port_clock(const void *caller)
 {
+    if (sClockTraceFrames < 0)
+    {
+        sClockTraceFrames = port_env_int("N64_CLOCK_TRACE");
+    }
+    if ((s32)gPortFrameCount < sClockTraceFrames)
+    {
+        port_log("clock: frame %u read %llu from %p", gPortFrameCount, (unsigned long long)sClockReads, caller);
+    }
     return (u64)gPortFrameCount * PORT_COUNTS_PER_FRAME + (sClockReads++ * PORT_COUNTS_PER_READ);
 }
 
+#if defined(__wasm__)
+#define PORT_CALLER NULL
+#else
+#define PORT_CALLER __builtin_return_address(0)
+#endif
+
 u32 osGetCount(void)
 {
-    return (u32)port_clock();
+    return (u32)port_clock(PORT_CALLER);
 }
 
 OSTime osGetTime(void)
 {
-    return port_clock();
+    return port_clock(PORT_CALLER);
 }
 
 /* ---- SP tasks ---------------------------------------------------------------------- */

@@ -13,7 +13,19 @@
 
 #include <stdint.h>
 
-#ifdef PORT_RSP_HOST
+#if defined(PORT_RSP_HOST) && defined(PORT_RSP_RECOMP)
+/* Recomp mode (runtime/recomp): RDRAM as N64Recomp's code keeps it on a little-endian host,
+ * native 32-bit words: halfword addresses ^2, byte addresses ^3. RDRAM pointers are word
+ * aligned (the window is page aligned), so the XOR works on host pointers. */
+extern uint8_t *gRecompRdram;
+
+#define GM_PTR(addr) ((addr) == 0 ? NULL : (void *)(gRecompRdram + ((uint32_t)(addr) & 0x1FFFFFFFu)))
+#define GM_U32(p) (*(const uint32_t *)(const void *)(p))
+#define GM_U16(p) (*(const uint16_t *)(const void *)((uintptr_t)(p) ^ 2))
+#define GM_U8(p) (*(const uint8_t *)(const void *)((uintptr_t)(p) ^ 3))
+#define GM_BIG_ENDIAN_DATA 1
+#define GM_SWAPPED 1
+#elif defined(PORT_RSP_HOST)
 #include "n64w.h"
 
 extern unsigned char *gPortGuestMem; /* the guest's memory buffer (n64w_host.c) */
@@ -31,6 +43,14 @@ extern unsigned char *gPortGuestMem; /* the guest's memory buffer (n64w_host.c) 
 #define GM_BIG_ENDIAN_DATA 0
 #endif
 
+#ifndef GM_U8
+#define GM_U8(p) (*(const uint8_t *)(const void *)(p))
+#endif
+#ifndef GM_SWAPPED
+#define GM_SWAPPED 0
+#endif
+
 #define GM_S16(p) ((int16_t)GM_U16(p))
+#define GM_S8(p) ((int8_t)GM_U8(p))
 
 #endif /* PORT_GMEM_H */
