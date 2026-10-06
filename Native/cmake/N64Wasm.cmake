@@ -32,8 +32,19 @@ function(_n64port_find_tool var pattern probe)
         "above the project: download wasi-sdk and WABT for this OS into one, or set ${var}")
 endfunction()
 
+# Guest memory: one buffer of this many MB (a power of two) holds the module's data, its
+# arena and stack, with N64 addresses folded onto it. 64 MB is roomy; consoles with little
+# memory use 16 MB with a smaller arena (the module must still fit: checked at start-up).
+set(N64PORT_WASM_WINDOW_MB 64 CACHE STRING "Guest memory window of the wasm guest in MB (power of two)")
+set(N64PORT_WASM_ARENA_MB 24 CACHE STRING "The wasm guest's own arena in MB (port_arena_alloc: thread stacks, overlays)")
+# The RSP tasks (runtime/guest/port_gfx.c, the display list interpreter, and port_audio_abi1.c,
+# the aspMain audio microcode) as native host code reading the guest's memory, instead of inside
+# the guest: much faster on slow CPUs.
+option(N64PORT_RSP_HOST "Run the RSP tasks natively in the host of the wasm guest" OFF)
+
 function(n64port_wasm_guest name)
     cmake_parse_arguments(G "" "" "SOURCES;DEFS;INCLUDES;FORCE" ${ARGN})
+    math(EXPR window_mask "${N64PORT_WASM_WINDOW_MB} * 1048576 - 1" OUTPUT_FORMAT HEXADECIMAL)
     _n64port_find_tool(N64PORT_WASI_SDK "wasi-sdk-*" bin/clang)
     _n64port_find_tool(N64PORT_WABT "wabt-*" bin/wasm2c)
     set(wasm_cc "${N64PORT_WASI_SDK}/bin/clang${CMAKE_HOST_EXECUTABLE_SUFFIX}")
@@ -45,7 +56,8 @@ function(n64port_wasm_guest name)
     file(MAKE_DIRECTORY "${wdir}/obj")
 
     set(flags -ffreestanding -funsigned-char -fno-strict-aliasing -fwrapv -ffp-contract=off -fno-builtin -fno-math-errno
-        -fno-common -nostdlibinc -Wno-everything -std=gnu89 -O2 -DPORT=1 -DPORT_WASM=1)
+        -fno-common -nostdlibinc -Wno-everything -std=gnu89 -O2 -DPORT=1 -DPORT_WASM=1
+        "-DPORT_ARENA_SIZE=(${N64PORT_WASM_ARENA_MB}u<<20)")
     foreach(d ${G_DEFS})
         list(APPEND flags "-D${d}")
     endforeach()
@@ -57,9 +69,19 @@ function(n64port_wasm_guest name)
         list(APPEND flags -include "${h}")
     endforeach()
 
+    set(guest_sources ${G_SOURCES})
+    set(rsp_sources "${N64PORT_DIR}/runtime/guest/port_gfx.c")
+    if("${N64PORT_DIR}/runtime/guest/port_audio_abi1.c" IN_LIST G_SOURCES)
+        list(APPEND rsp_sources "${N64PORT_DIR}/runtime/guest/port_audio_abi1.c")
+    endif()
+    if(N64PORT_RSP_HOST)
+        list(REMOVE_ITEM guest_sources ${rsp_sources})
+        list(APPEND flags -DPORT_RSP_HOST_TASKS=1) # the guest hands its RSP tasks to the host
+    endif()
+
     set(objs)
     set(index 0)
-    foreach(src ${G_SOURCES} "${N64PORT_DIR}/runtime/wasm/n64w_guest.c")
+    foreach(src ${guest_sources} "${N64PORT_DIR}/runtime/wasm/n64w_guest.c")
         get_filename_component(stem "${src}" NAME_WE)
         set(obj "${wdir}/obj/${index}_${stem}.o")
         math(EXPR index "${index} + 1")
@@ -134,14 +156,70 @@ function(n64port_wasm_guest name)
         "${N64PORT_DIR}/runtime/host/port_host_posix.c")
     target_include_directories(${name} PRIVATE "${w2c_dir}" "${N64PORT_DIR}/runtime/wasm" "${N64PORT_INCLUDE_DIR}"
         "${N64PORT_DIR}/runtime/host")
-    target_compile_definitions(${name} PRIVATE N64W_MODULE=${name} PORT_WASM_HOST=1)
+    target_compile_definitions(${name} PRIVATE N64W_MODULE=${name} PORT_WASM_HOST=1 "N64W_WINDOW_MASK=${window_mask}u")
     target_compile_options(${name} PRIVATE -O2 -w)
+    if(N64PORT_RSP_HOST)
+        # Native port_gfx.c: the game's GBI / ultratypes headers (after the system ones, which
+        # the decomp's own libc headers must not shadow), none of the guest prelude.
+        target_sources(${name} PRIVATE ${rsp_sources})
+        target_compile_definitions(${name} PRIVATE PORT_RSP_HOST=1)
+        # (the guest's code generation rules where they matter for identical pictures)
+        set(gfx_options -funsigned-char -fwrapv -fno-strict-aliasing -ffp-contract=off)
+        foreach(d ${G_INCLUDES})
+            list(APPEND gfx_options "-idirafter" "${d}")
+        endforeach()
+        set_source_files_properties(${rsp_sources} PROPERTIES
+            COMPILE_DEFINITIONS "${G_DEFS};PORT=1;_SIZE_T_DEF" # (size_t: the system one)
+            COMPILE_OPTIONS "${gfx_options}"
+            INCLUDE_DIRECTORIES "${N64PORT_DIR}/runtime/guest")
+        if(N64PORT_GFX STREQUAL "gpu")
+            # GPU backend (port_gpu.h): citro3d on 3DS, the null backend elsewhere (tests)
+            target_compile_definitions(${name} PRIVATE PORT_GFX_GPU=1)
+            if(N64PORT_CONSOLE STREQUAL "3DS")
+                # its vertex shader, assembled and embedded as a byte array
+                set(vsh "${N64PORT_DIR}/runtime/host/port_gpu_c3d.v.pica")
+                add_custom_command(OUTPUT "${wdir}/port_gpu_c3d_shbin.c"
+                    COMMAND "${DEVKITPRO}/tools/bin/picasso${CMAKE_HOST_EXECUTABLE_SUFFIX}" -o "${wdir}/port_gpu_c3d.shbin" "${vsh}"
+                    COMMAND "${Python3_EXECUTABLE}" "${tools}/bin2c.py" "${wdir}/port_gpu_c3d.shbin"
+                            "${wdir}/port_gpu_c3d_shbin.c" port_gpu_c3d_shbin
+                    DEPENDS "${vsh}" "${tools}/bin2c.py"
+                    COMMENT "picasso port_gpu_c3d.v.pica" VERBATIM)
+                target_sources(${name} PRIVATE "${N64PORT_DIR}/runtime/host/port_gpu_c3d.c" "${wdir}/port_gpu_c3d_shbin.c")
+            else()
+                target_sources(${name} PRIVATE "${N64PORT_DIR}/runtime/host/port_gpu_null.c")
+            endif()
+        endif()
+    elseif(N64PORT_GFX STREQUAL "gpu")
+        message(FATAL_ERROR "N64PORT_GFX=gpu with the wasm guest needs N64PORT_RSP_HOST")
+    endif()
+    if(N64PORT_ROM_STREAM)
+        target_compile_definitions(${name} PRIVATE PORT_ROM_STREAM=1)
+    endif()
     set_target_properties(${name} PROPERTIES MSVC_RUNTIME_LIBRARY "")
     if(CMAKE_C_COMPILER_ID MATCHES "Clang" AND WIN32)
         # no default C runtime named in the objects: the addon links whichever it uses (/MD or /MDd)
         target_compile_options(${name} PRIVATE -fms-omit-default-lib)
     endif()
 
+    if(N64PORT_CONSOLE STREQUAL "3DS")
+        # Standalone runner (no engine) for measuring and bring-up: host/main_3ds.c -> .3dsx
+        add_executable(${name}_host "${N64PORT_DIR}/host/main_3ds.c")
+        set_target_properties(${name}_host PROPERTIES SUFFIX ".elf")
+        target_include_directories(${name}_host PRIVATE "${N64PORT_INCLUDE_DIR}" "${N64PORT_DIR}/runtime/host")
+        target_link_directories(${name}_host PRIVATE "${N64PORT_CTRU_DIR}/lib")
+        if(N64PORT_GFX STREQUAL "gpu")
+            target_compile_definitions(${name}_host PRIVATE PORT_GFX_GPU=1)
+            target_link_libraries(${name}_host PRIVATE ${name} citro3d ctru m)
+        else()
+            target_link_libraries(${name}_host PRIVATE ${name} ctru m)
+        endif()
+        target_link_options(${name}_host PRIVATE -specs=3dsx.specs)
+        add_custom_command(TARGET ${name}_host POST_BUILD
+            COMMAND "${DEVKITPRO}/tools/bin/3dsxtool${CMAKE_HOST_EXECUTABLE_SUFFIX}" "$<TARGET_FILE:${name}_host>"
+                    "${CMAKE_BINARY_DIR}/${name}_host.3dsx"
+            VERBATIM)
+        return()
+    endif()
     add_executable(${name}_host "${N64PORT_DIR}/host/main.c")
     target_include_directories(${name}_host PRIVATE "${N64PORT_INCLUDE_DIR}")
     target_link_libraries(${name}_host PRIVATE ${name})

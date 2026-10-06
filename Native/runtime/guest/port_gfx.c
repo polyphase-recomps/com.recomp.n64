@@ -8,6 +8,10 @@
  *
  * First-pass accuracy: point sampling, one or two combiner cycles, alpha
  * blending and alpha test, depth buffer. No fog, LOD, coverage or dither.
+ *
+ * With PORT_RSP_HOST this file is compiled into the host of the wasm guest instead and runs
+ * as native code over the guest's big-endian memory (port_gmem.h); the guest hands it its
+ * graphics tasks (port_gfx_run_guest_task).
  */
 #include <port_types.h>
 #include <PR/mbi.h>
@@ -16,6 +20,28 @@
 #include <port_host.h>
 #include <port_game.h>
 #include "port_guest.h"
+#include "port_gmem.h"
+
+#ifdef PORT_RSP_HOST
+/* Game-side helpers do not exist in the host: guest memory has no asset map. */
+#define port_asset_describe(ptr, file_id, offset) 0
+/* A guest display list command is two words; the host's Gfx union holds pointers, so it may be
+ * wider. */
+typedef struct
+{
+    Gwords words;
+} PortGuestGfx;
+#define Gfx PortGuestGfx
+#endif
+
+/* The two words of a display list command */
+#ifdef PORT_RSP_HOST
+#define DL_W0(d) GM_U32(&(d)->words.w0)
+#define DL_W1(d) ((uintptr_t)GM_U32(&(d)->words.w1))
+#else
+#define DL_W0(d) ((u32)(d)->words.w0)
+#define DL_W1(d) ((d)->words.w1)
+#endif
 
 #define FB_W 320
 #define FB_H 240
@@ -70,7 +96,7 @@ static f32 sLightDir[9][3];
 static PortColor sPrim, sEnv, sBlend, sFill, sFog;
 static u32 sCombineW0, sCombineW1;
 
-static u8 sTmem[TMEM_SIZE + 8];
+static u8 sTmem[TMEM_SIZE + 8] __attribute__((aligned(8)));
 /* Set per TMEM word address by a LoadBlock with dxt == 0: the RDP always swaps the two 32-bit
  * halves of each 64-bit word on odd rows when sampling. Loads normally pre-swap those rows
  * (so the two cancel), but a dxt == 0 block load does not, and such textures are stored
@@ -85,6 +111,15 @@ static f32 sTextureScaleS, sTextureScaleT;
 
 static uintptr_t sColorImage, sDepthImage;
 static u32 sRdpHalf1, sRdpHalf2;
+
+#ifdef PORT_GFX_GPU
+/* Bumped whenever something the GPU pixel state is derived from changes (port_gfx_gpu.h caches
+ * the state of the triangles drawn until then). */
+static u32 sGpuStateSerial = 1;
+#define GPU_STATE_CHANGED() (sGpuStateSerial++)
+#else
+#define GPU_STATE_CHANGED() ((void)0)
+#endif
 
 /* Debug aid: log every display list command of this frame (0 = off). */
 u32 gPortGfxTraceFrame;
@@ -117,7 +152,9 @@ static sb32 gfx_is_segmented(uintptr_t addr)
 #ifdef PORT_64BIT
     return (addr >> 32) == 0;
 #else
-    return (addr >> 28) == 0 && sSegments[(addr >> 24) & 0xF] != 0;
+    /* Pointers on 32-bit hosts can be below 0x10000000 as well (3DS, ARM Linux): an address the
+     * port knows as its own memory or module data is native whatever its top byte says. */
+    return (addr >> 28) == 0 && sSegments[(addr >> 24) & 0xF] != 0 && !port_addr_is_native((const void *)addr);
 #endif
 }
 
@@ -131,9 +168,9 @@ static void *gfx_addr(uintptr_t addr)
         {
             return NULL;
         }
-        return (void *)(base + (addr & 0x00FFFFFF));
+        return GM_PTR(base + (addr & 0x00FFFFFF));
     }
-    return (void *)addr;
+    return GM_PTR(addr);
 }
 
 /* ---- matrices ----------------------------------------------------------------- */
@@ -167,7 +204,7 @@ static void mtx_from_fixed(f32 out[4][4], const Mtx *mtx)
 
     for (i = 0; i < 16; i++)
     {
-        u32 hi = words[i / 2], lo = words[8 + i / 2];
+        u32 hi = GM_U32(&words[i / 2]), lo = GM_U32(&words[8 + i / 2]);
         s32 ip = (i & 1) ? (s16)(hi & 0xFFFF) : (s16)(hi >> 16);
         u32 fp = (i & 1) ? (lo & 0xFFFF) : (lo >> 16);
 
@@ -264,14 +301,14 @@ static void gfx_vertices(u32 w0, uintptr_t w1)
     for (i = 0; i < count; i++, src++)
     {
         PortVtx *v = &sVtx[first + i];
-        f32 x = src->v.ob[0], y = src->v.ob[1], z = src->v.ob[2];
+        f32 x = GM_S16(&src->v.ob[0]), y = GM_S16(&src->v.ob[1]), z = GM_S16(&src->v.ob[2]);
 
         v->x = x * sMP[0][0] + y * sMP[1][0] + z * sMP[2][0] + sMP[3][0];
         v->y = x * sMP[0][1] + y * sMP[1][1] + z * sMP[2][1] + sMP[3][1];
         v->z = x * sMP[0][2] + y * sMP[1][2] + z * sMP[2][2] + sMP[3][2];
         v->w = x * sMP[0][3] + y * sMP[1][3] + z * sMP[2][3] + sMP[3][3];
-        v->s = (f32)src->v.tc[0] * sTextureScaleS / 32.0F;
-        v->t = (f32)src->v.tc[1] * sTextureScaleT / 32.0F;
+        v->s = (f32)GM_S16(&src->v.tc[0]) * sTextureScaleS / 32.0F;
+        v->t = (f32)GM_S16(&src->v.tc[1]) * sTextureScaleT / 32.0F;
         v->a = src->v.cn[3];
 
         if (sGeometryMode & G_LIGHTING)
@@ -325,6 +362,87 @@ static void gfx_vertices(u32 w0, uintptr_t w1)
  * Asset arrays declared u8 already are in that order; arrays declared u16 hold host-order
  * values natively and are swapped here when the texture really is 16 bits per texel.
  */
+#ifdef PORT_GFX_GPU
+/*
+ * Where texture memory came from. The GPU path names a texture by the bytes it is decoded
+ * from, and hashing them every time a tile is used again costs more than anything else on slow
+ * CPUs. A load instead remembers a signature of its source (address, size, layout and a few
+ * sampled words, which catch an image redrawn in place) for the TMEM range it filled; a tile
+ * that lies inside one such range is named by that signature.
+ */
+#define TMEM_LOADS 24
+
+typedef struct TmemLoad
+{
+    u32 start, end; /* TMEM byte range */
+    u32 sig;
+} TmemLoad;
+
+static TmemLoad sTmemLoads[TMEM_LOADS];
+static s32 sTmemLoadNum;
+
+static u32 tmem_mix(u32 hash, u32 value)
+{
+    return (hash ^ value) * 16777619u;
+}
+
+static void tmem_note_load(u32 start, u32 end, const void *src, u32 a, u32 b)
+{
+    u32 sig = 2166136261u, words = (end - start) / 4, i;
+    s32 n, k = 0;
+
+    if (end <= start || end > TMEM_SIZE)
+    {
+        return;
+    }
+    /* forget what this load overwrote */
+    for (n = 0; n < sTmemLoadNum; n++)
+    {
+        if (sTmemLoads[n].end <= start || sTmemLoads[n].start >= end)
+        {
+            sTmemLoads[k++] = sTmemLoads[n];
+        }
+    }
+    sTmemLoadNum = k;
+    if (sTmemLoadNum == TMEM_LOADS)
+    {
+        port_memcpy(&sTmemLoads[0], &sTmemLoads[1], sizeof(TmemLoad) * (TMEM_LOADS - 1));
+        sTmemLoadNum--;
+    }
+    sig = tmem_mix(sig, (u32)(uintptr_t)src);
+    sig = tmem_mix(sig, a);
+    sig = tmem_mix(sig, b);
+    sig = tmem_mix(sig, end - start);
+    for (i = 0; i < 8 && words != 0; i++)
+    {
+        u32 w = (words <= 8) ? i % words : (i * (words - 1)) / 7;
+        const u8 *p = &sTmem[start + w * 4];
+
+        sig = tmem_mix(sig, ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | p[3]);
+    }
+    sTmemLoads[sTmemLoadNum].start = start;
+    sTmemLoads[sTmemLoadNum].end = end;
+    sTmemLoads[sTmemLoadNum].sig = sig;
+    sTmemLoadNum++;
+}
+
+/* TRUE and a signature if [start, end) was filled by one load. */
+static sb32 tmem_region_sig(u32 start, u32 end, u32 *sig)
+{
+    s32 n;
+
+    for (n = sTmemLoadNum - 1; n >= 0; n--)
+    {
+        if (sTmemLoads[n].start <= start && end <= sTmemLoads[n].end)
+        {
+            *sig = tmem_mix(tmem_mix(tmem_mix(sTmemLoads[n].sig, start - sTmemLoads[n].start), end - start), 0x9E3779B9u);
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+#endif
+
 static void gfx_copy_texels(u8 *dst, const u8 *src, u32 bytes)
 {
 #ifdef PORT_LITTLE_ENDIAN
@@ -362,6 +480,7 @@ static void gfx_load_block(u32 w0, u32 w1)
     gfx_copy_texels(&sTmem[dst], src, bytes);
 #ifdef PORT_GFX_GPU
     sTexGen++;
+    tmem_note_load(dst, dst + bytes, src, w0, w1 ^ ((u32)sTimgSiz << 28));
 #endif
     gfx_trace_data("load block", &sTmem[dst], bytes);
     sTmemShuffled[tile->tmem & 511] = ((w1 & 0xFFF) == 0);
@@ -400,6 +519,12 @@ static void gfx_load_tile(u32 w0, u32 w1)
         gfx_copy_texels(&sTmem[dst], src + off, row_bytes);
         gfx_trace_data("load tile row", &sTmem[dst], row_bytes);
     }
+#ifdef PORT_GFX_GPU
+    if (y > ult)
+    {
+        tmem_note_load(tile->tmem * 8, tile->tmem * 8 + (y - ult) * stride, src, w0 ^ (sTimgWidth << 24), w1 ^ (stride << 20) ^ ((u32)sTimgSiz << 30));
+    }
+#endif
 }
 
 static void gfx_load_tlut(u32 w1)
@@ -422,7 +547,11 @@ static void gfx_load_tlut(u32 w1)
 #ifdef PORT_GFX_GPU
     sTexGen++;
 #endif
+#if GM_BIG_ENDIAN_DATA
+    is_bytes = TRUE;
+#else
     is_bytes = (port_asset_elem_size(src) == 1);
+#endif
     for (i = 0; i < count && dst + 1 < TMEM_SIZE; i++, dst += 2)
     {
         if (is_bytes)
@@ -439,6 +568,9 @@ static void gfx_load_tlut(u32 w1)
         }
     }
     gfx_trace_data("load tlut", &sTmem[dst - i * 2], i * 2);
+#ifdef PORT_GFX_GPU
+    tmem_note_load(dst - i * 2, dst, src, w1, 0x7107u);
+#endif
 }
 
 static void color_from_5551(PortColor *c, u32 v)
@@ -474,8 +606,11 @@ static s32 tex_coord(s32 c, u32 mask, u32 mode, s32 size)
 /* The tile's coordinate shift: 1..10 divide the coordinate by 2^n, 11..15 multiply it by 2^(16-n). */
 static f32 tex_shift(f32 c, u32 shift)
 {
-    if (shift == 0) return c;
-    return (shift <= 10) ? c / (f32)(1 << shift) : c * (f32)(1 << (16 - shift));
+    /* right by 1..10, left by 1..5 (multiplying by a power of two is exact, like dividing) */
+    static const f32 kScale[16] = { 1.0F, 1.0F / 2, 1.0F / 4, 1.0F / 8, 1.0F / 16, 1.0F / 32, 1.0F / 64, 1.0F / 128,
+                                    1.0F / 256, 1.0F / 512, 1.0F / 1024, 32.0F, 16.0F, 8.0F, 4.0F, 2.0F };
+
+    return (shift == 0) ? c : c * kScale[shift & 15];
 }
 
 /* Texel of a tile at tile coordinates (already shifted, relative to the tile's origin). */
@@ -717,8 +852,18 @@ static void to_screen(PortScreenVtx *out, const PortVtx *v)
     out->r = v->r * iw; out->g = v->g * iw; out->b = v->b * iw; out->a = v->a * iw;
 }
 
+static int sProfSkip = -1; /* N64_PROF_SKIP (see osSpTaskStartGo in port_io.c) */
+
 static void raster_triangle(const PortScreenVtx *v0, const PortScreenVtx *v1, const PortScreenVtx *v2)
 {
+    if (sProfSkip < 0)
+    {
+        sProfSkip = port_env_int("N64_PROF_SKIP");
+    }
+    if (sProfSkip & 4)
+    {
+        return;
+    }
     f32 area = (v1->x - v0->x) * (v2->y - v0->y) - (v2->x - v0->x) * (v1->y - v0->y);
     f32 min_x, max_x, min_y, max_y, inv;
     s32 x0, x1, y0, y1, x, y;
@@ -859,6 +1004,10 @@ static void gfx_triangle(s32 i0, s32 i1, s32 i2)
 /* ---- rectangles ------------------------------------------------------------------------- */
 static void gfx_fill_rect(u32 w0, u32 w1)
 {
+    if (sProfSkip & 8)
+    {
+        return;
+    }
     s32 x1 = ((w0 >> 12) & 0xFFF) >> 2, y1 = (w0 & 0xFFF) >> 2;
     s32 x0 = ((w1 >> 12) & 0xFFF) >> 2, y0 = (w1 & 0xFFF) >> 2;
     u32 cycle = sOtherModeH & (3 << G_MDSFT_CYCLETYPE);
@@ -988,8 +1137,10 @@ static void gfx_move_mem(u32 w0, uintptr_t w1)
     {
         Vp *vp = src;
 
-        sVpScale[0] = vp->vp.vscale[0] / 4.0F; sVpScale[1] = vp->vp.vscale[1] / 4.0F; sVpScale[2] = vp->vp.vscale[2];
-        sVpTrans[0] = vp->vp.vtrans[0] / 4.0F; sVpTrans[1] = vp->vp.vtrans[1] / 4.0F; sVpTrans[2] = vp->vp.vtrans[2];
+        sVpScale[0] = GM_S16(&vp->vp.vscale[0]) / 4.0F; sVpScale[1] = GM_S16(&vp->vp.vscale[1]) / 4.0F;
+        sVpScale[2] = GM_S16(&vp->vp.vscale[2]);
+        sVpTrans[0] = GM_S16(&vp->vp.vtrans[0]) / 4.0F; sVpTrans[1] = GM_S16(&vp->vp.vtrans[1]) / 4.0F;
+        sVpTrans[2] = GM_S16(&vp->vp.vtrans[2]);
     }
     else if (index == G_MV_LIGHT)
     {
@@ -1030,6 +1181,7 @@ static Gfx *gfx_dl_target(uintptr_t p1)
 {
     Gfx *target = gfx_addr(p1);
 
+#ifndef PORT_RSP_HOST /* (a guest's commands are 8 bytes) */
     if (gfx_is_segmented(p1) && target != NULL)
     {
         /* A segmented display list address counts in 8-byte N64 commands (models call their
@@ -1037,6 +1189,7 @@ static Gfx *gfx_dl_target(uintptr_t p1)
          * pointers are 64-bit. */
         target = (Gfx *)(sSegments[(p1 >> 24) & 0xF] + (p1 & 0x00FFFFFF) * (sizeof(Gfx) / 8));
     }
+#endif
     return target;
 }
 
@@ -1053,8 +1206,8 @@ static void gfx_run(Gfx *dl)
 
     while (dl != NULL && guard++ < 400000)
     {
-        u32 w0 = (u32)dl->words.w0;
-        uintptr_t p1 = dl->words.w1;
+        u32 w0 = DL_W0(dl);
+        uintptr_t p1 = DL_W1(dl);
         u32 w1 = (u32)p1;
 
         if (gPortGfxTraceFrame != 0 && gPortFrameCount == gPortGfxTraceFrame)
@@ -1075,13 +1228,36 @@ static void gfx_run(Gfx *dl)
         dl++;
         switch (w0 >> 24)
         {
-        case G_VTX: gfx_vertices(w0, p1); break;
-        case G_TRI1: gfx_triangle(((w0 >> 16) & 0xFF) / 2, ((w0 >> 8) & 0xFF) / 2, (w0 & 0xFF) / 2); break;
+        case G_VTX:
+            if (gPortVerbose)
+            {
+                unsigned long long t0 = port_ticks();
+
+                gfx_vertices(w0, p1);
+                gPortGfxProfile[0] += port_ticks() - t0;
+                gPortGfxProfile[4]++;
+                break;
+            }
+            gfx_vertices(w0, p1);
+            break;
+        case G_TRI1:
         case G_TRI2:
         case G_QUAD:
+        {
+            unsigned long long t0 = gPortVerbose ? port_ticks() : 0;
+
             gfx_triangle(((w0 >> 16) & 0xFF) / 2, ((w0 >> 8) & 0xFF) / 2, (w0 & 0xFF) / 2);
-            gfx_triangle(((w1 >> 16) & 0xFF) / 2, ((w1 >> 8) & 0xFF) / 2, (w1 & 0xFF) / 2);
+            if ((w0 >> 24) != G_TRI1)
+            {
+                gfx_triangle(((w1 >> 16) & 0xFF) / 2, ((w1 >> 8) & 0xFF) / 2, (w1 & 0xFF) / 2);
+            }
+            if (gPortVerbose)
+            {
+                gPortGfxProfile[3] += port_ticks() - t0;
+                gPortGfxProfile[7]++;
+            }
             break;
+        }
         case G_MODIFYVTX:
         {
             u32 index = (w0 & 0xFFFF) / 2;
@@ -1109,8 +1285,9 @@ static void gfx_run(Gfx *dl)
             if (sModelviewTop < 0) sModelviewTop = 0;
             mtx_mul(sMP, sModelview[sModelviewTop], sProjection); sMPInserted = FALSE;
             break;
-        case G_GEOMETRYMODE: sGeometryMode = (sGeometryMode & (w0 & 0x00FFFFFF)) | w1; break;
+        case G_GEOMETRYMODE: sGeometryMode = (sGeometryMode & (w0 & 0x00FFFFFF)) | w1; GPU_STATE_CHANGED(); break;
         case G_TEXTURE:
+            GPU_STATE_CHANGED();
             sTextureTile = (w0 >> 8) & 7;
             sTextureOn = ((w0 >> 1) & 0x7F) != 0;
             sTextureScaleS = (w1 >> 16) / 65536.0F;
@@ -1195,7 +1372,7 @@ static void gfx_run(Gfx *dl)
             else if (sLodMode == PORT_LOD_LOW)
             {
                 /* only the last test of the chain: the least detailed model */
-                take = !((dl[0].words.w0 >> 24) == G_RDPHALF_1 && (dl[1].words.w0 >> 24) == G_BRANCH_Z);
+                take = !((DL_W0(&dl[0]) >> 24) == G_RDPHALF_1 && (DL_W0(&dl[1]) >> 24) == G_BRANCH_Z);
             }
             else if (v->w > 0.0F)
             {
@@ -1220,6 +1397,7 @@ static void gfx_run(Gfx *dl)
             u32 mask = ((len >= 32) ? 0xFFFFFFFF : ((1u << len) - 1)) << shift;
 
             sOtherModeL = (sOtherModeL & ~mask) | (w1 & mask);
+            GPU_STATE_CHANGED();
             break;
         }
         case G_SETOTHERMODE_H:
@@ -1228,17 +1406,18 @@ static void gfx_run(Gfx *dl)
             u32 mask = ((len >= 32) ? 0xFFFFFFFF : ((1u << len) - 1)) << shift;
 
             sOtherModeH = (sOtherModeH & ~mask) | (w1 & mask);
+            GPU_STATE_CHANGED();
             break;
         }
-        case G_RDPSETOTHERMODE: sOtherModeH = w0 & 0x00FFFFFF; sOtherModeL = w1; break;
+        case G_RDPSETOTHERMODE: sOtherModeH = w0 & 0x00FFFFFF; sOtherModeL = w1; GPU_STATE_CHANGED(); break;
         case G_TEXRECT:
         case G_TEXRECTFLIP:
         {
             /* The texture coordinates follow in two G_RDPHALF commands. */
             u32 rect_w0 = w0, rect_w1 = w1;
 
-            sRdpHalf1 = (u32)dl[0].words.w1;
-            sRdpHalf2 = (u32)dl[1].words.w1;
+            sRdpHalf1 = (u32)DL_W1(&dl[0]);
+            sRdpHalf2 = (u32)DL_W1(&dl[1]);
             dl += 2;
             gfx_tex_rect(rect_w0, rect_w1, (rect_w0 >> 24) == G_TEXRECTFLIP);
             break;
@@ -1262,8 +1441,20 @@ static void gfx_run(Gfx *dl)
             tile->sh = ((w1 >> 12) & 0xFFF) / 4.0F; tile->th = (w1 & 0xFFF) / 4.0F;
             break;
         }
-        case G_LOADBLOCK: gfx_load_block(w0, w1); break;
-        case G_LOADTILE: gfx_load_tile(w0, w1); break;
+        case G_LOADBLOCK:
+        case G_LOADTILE:
+        {
+            unsigned long long t0 = gPortVerbose ? port_ticks() : 0;
+
+            if ((w0 >> 24) == G_LOADBLOCK) gfx_load_block(w0, w1);
+            else gfx_load_tile(w0, w1);
+            if (gPortVerbose)
+            {
+                gPortGfxProfile[1] += port_ticks() - t0;
+                gPortGfxProfile[5]++;
+            }
+            break;
+        }
         case G_SETTILE:
         {
             PortTile *tile = &sTiles[(w1 >> 24) & 7];
@@ -1282,10 +1473,10 @@ static void gfx_run(Gfx *dl)
         case G_FILLRECT: gfx_fill_rect(w0, w1); break;
         case G_SETFILLCOLOR: color_from_5551(&sFill, w1 >> 16); break;
         case G_SETBLENDCOLOR: color_from_rgba32(&sBlend, w1); break;
-        case G_SETPRIMCOLOR: color_from_rgba32(&sPrim, w1); break;
-        case G_SETENVCOLOR: color_from_rgba32(&sEnv, w1); break;
-        case G_SETFOGCOLOR: color_from_rgba32(&sFog, w1); break;
-        case G_SETCOMBINE: sCombineW0 = w0 & 0x00FFFFFF; sCombineW1 = w1; break;
+        case G_SETPRIMCOLOR: color_from_rgba32(&sPrim, w1); GPU_STATE_CHANGED(); break;
+        case G_SETENVCOLOR: color_from_rgba32(&sEnv, w1); GPU_STATE_CHANGED(); break;
+        case G_SETFOGCOLOR: color_from_rgba32(&sFog, w1); GPU_STATE_CHANGED(); break;
+        case G_SETCOMBINE: sCombineW0 = w0 & 0x00FFFFFF; sCombineW1 = w1; GPU_STATE_CHANGED(); break;
         case G_SETTIMG:
             sTimgFmt = (w0 >> 21) & 7; sTimgSiz = (w0 >> 19) & 3; sTimgWidth = (w0 & 0xFFF) + 1;
             sTimgAddr = p1;
@@ -1330,9 +1521,19 @@ static void gfx_describe(const char *what, void *ptr)
     }
 }
 
-void port_gfx_run_task(OSTask *task)
+static int sSkipDraw;
+
+void n64_set_skip_draw(int skip)
 {
-    gPortProgress[4]++;
+    sSkipDraw = skip;
+}
+
+static void gfx_run_task(Gfx *list)
+{
+    if (sSkipDraw)
+    {
+        return; /* the host shows a later frame instead */
+    }
 #ifdef PORT_GFX_GPU
     port_gpu_frame_begin();
 #endif
@@ -1343,11 +1544,11 @@ void port_gfx_run_task(OSTask *task)
      * A display list that points at bad data must not take the game down: the frame is cut
      * short and the offending command is reported (once per distinct command).
      */
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(PORT_RSP_HOST)
     gPortFaultGuard++;
     __try
     {
-        gfx_run((Gfx *)task->t.data_ptr);
+        gfx_run(list);
     }
     __except (1)
     {
@@ -1388,13 +1589,29 @@ void port_gfx_run_task(OSTask *task)
     }
     gPortFaultGuard--;
 #else
-    gfx_run((Gfx *)task->t.data_ptr);
+    gfx_run(list);
 #endif
     if (gPortVerbose && (gPortFrameCount % 60) == 0)
     {
         port_log("gfx: frame %u: %u tris, %u rects, %u unknown commands", gPortFrameCount, sStatTris, sStatRects, sStatUnknown);
     }
 }
+
+#ifdef PORT_RSP_HOST
+/* The guest's osSpTaskStartGo hands over a graphics task by its guest address. */
+void port_gfx_run_guest_task(u32 task)
+{
+    const u8 *t = GM_PTR(task);
+
+    gfx_run_task((Gfx *)GM_PTR(GM_U32(t + 48))); /* OSTask_t.data_ptr */
+}
+#else
+void port_gfx_run_task(OSTask *task)
+{
+    gPortProgress[4]++;
+    gfx_run_task((Gfx *)task->t.data_ptr);
+}
+#endif
 
 void port_gfx_set_framebuffer(void *fb)
 {
@@ -1409,7 +1626,7 @@ void port_gfx_set_framebuffer(void *fb)
 
 int n64_draws_to_screen(void)
 {
-#ifdef PORT_GFX_GPU
+#if defined(PORT_GFX_GPU) && !defined(__3DS__) /* (the citro3d backend draws into a texture) */
     return 1;
 #else
     return 0;

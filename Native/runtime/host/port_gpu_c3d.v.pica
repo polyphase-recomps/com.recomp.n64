@@ -1,0 +1,18 @@
+; Vertex shader of the citro3d backend (port_gpu_c3d.c): vertices arrive in clip space, already
+; rotated for the 3DS screens; the colour arrives as unsigned bytes (0..255).
+.constf scale(0.0039215686, 0.0039215686, 0.0039215686, 0.0039215686)
+
+.out outpos position
+.out outtc0 texcoord0
+.out outclr color
+
+.alias inpos v0
+.alias intc v1
+.alias inclr v2
+
+.proc main
+	mov outpos, inpos
+	mov outtc0, intc
+	mul outclr, scale, inclr
+	end
+.end

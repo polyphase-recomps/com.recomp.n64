@@ -25,6 +25,33 @@ import subprocess
 import sys
 
 
+# WABT's Windows wasm2c.exe needs OpenSSL's libcrypto-3-x64.dll, which its release does not ship.
+# Shells usually find one through PATH (Git for Windows has it); processes started from other
+# programs (the Polyphase editor) often do not, and wasm2c then dies before printing anything.
+WASM2C_DLLS = ["libcrypto-3-x64.dll"]
+DLL_FOLDERS = ["C:/Program Files/Git/mingw64/bin", "C:/Program Files/Git/usr/bin",
+               "C:/Program Files/OpenSSL-Win64/bin", "C:/Program Files/OpenSSL/bin"]
+
+
+def wasm2c_env(wasm2c):
+    """The environment to run wasm2c in: PATH extended with a folder holding its DLLs."""
+    env = dict(os.environ)
+    if os.name != "nt":
+        return env
+    search = [os.path.dirname(os.path.abspath(wasm2c))] + env.get("PATH", "").split(os.pathsep) + DLL_FOLDERS
+    extra = []
+    for dll in WASM2C_DLLS:
+        found = next((d for d in search if d and os.path.isfile(os.path.join(d, dll))), None)
+        if found is None:
+            sys.exit(f"wasm2c needs {dll} (OpenSSL), which is not next to {wasm2c} nor on PATH. Copy it "
+                     f"into {os.path.dirname(os.path.abspath(wasm2c))} (Git for Windows has one in "
+                     f"C:/Program Files/Git/mingw64/bin).")
+        if found not in extra:
+            extra.append(found)
+    env["PATH"] = os.pathsep.join(extra + [env.get("PATH", "")])
+    return env
+
+
 # ---- wasm binary: trim data segments ----------------------------------------------
 def read_uleb(b, p):
     result = shift = 0
@@ -252,8 +279,10 @@ def main():
             os.remove(os.path.join(out_dir, old))
     out_c = os.path.join(out_dir, stem + ".c")
     cmd = [wasm2c, trimmed, "-n", name, "--num-outputs=" + outputs, "--disable-tail-call", "-o", out_c]
-    if subprocess.call(cmd) != 0:
-        sys.exit("wasm2c failed")
+    code = subprocess.call(cmd, env=wasm2c_env(wasm2c))
+    if code != 0:
+        hint = " (a DLL it needs was not found)" if code in (-1073741515, 0xC0000135) else ""
+        sys.exit(f"wasm2c failed with exit code {code}{hint}")
     patch_header(os.path.join(out_dir, stem + ".h"), prefix)
     impl_text = patch_impl(os.path.join(out_dir, stem + "-impl.h"), prefix)
     c_files = [os.path.join(out_dir, f"{stem}_{i}.c") for i in range(int(outputs))]

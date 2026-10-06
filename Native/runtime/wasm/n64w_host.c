@@ -20,6 +20,9 @@
 #include "port_host.h"
 #include "port_bridge.h"
 #include "port_host_plat.h"
+#if defined(PORT_RSP_HOST) && defined(PORT_GFX_GPU)
+#include "port_gpu.h"
+#endif
 #include "wasm-rt.h"
 #include "n64w.h"
 
@@ -33,6 +36,16 @@ typedef N64W_CAT(w2c_, N64W_MODULE) Instance;
 #define GUEST(fn) N64W_CAT(N64W_CAT(N64W_CAT(w2c_, N64W_MODULE), _), fn)
 #define STACK_POINTER w2c_0x5F_stack_pointer
 
+/* Native stack of each guest thread: the translated code's own call frames (the guest's stack
+ * is in its memory). Consoles with little memory get less. */
+#ifndef N64W_HOST_STACK
+#if defined(__3DS__)
+#define N64W_HOST_STACK (256u * 1024u)
+#else
+#define N64W_HOST_STACK (1024u * 1024u)
+#endif
+#endif
+
 struct w2c_env
 {
     int unused;
@@ -43,6 +56,28 @@ static struct w2c_env sEnv;
 static int sInstantiated;
 static int sRomLoaded;
 static unsigned char *sMem;
+
+#ifdef PORT_RSP_HOST
+/* runtime/guest/port_gfx.c, compiled into this library, interprets the guest's graphics tasks
+ * natively (port_gmem.h) */
+unsigned char *gPortGuestMem;
+unsigned int gPortFrameCount; /* the guest's, as of its last task */
+extern unsigned int gPortGfxTraceFrame;
+void port_gfx_run_guest_task(unsigned int task);
+void port_gfx_set_framebuffer(void *fb);
+void port_gfx_set_lod(int mode);
+int port_gfx_lod(void);
+void port_audio_run_guest_abi1(unsigned int cmds, unsigned int count);
+
+/* Profiling: time spent in graphics and audio tasks (3DS: system ticks; 0 elsewhere) */
+unsigned long long gPortGfxTicks, gPortAudioTicks;
+#if defined(__3DS__)
+#include <3ds/svc.h>
+#define PROF_TICKS() svcGetSystemTick()
+#else
+#define PROF_TICKS() 0
+#endif
+#endif
 
 static void *guest_ptr(uint32_t addr)
 {
@@ -122,6 +157,51 @@ uint32_t w2c_env_n64w_rom_size(struct w2c_env *env)
     return port_rom_size();
 }
 
+/* ---- graphics (PORT_RSP_HOST) ------------------------------------------------------------------- */
+#ifdef PORT_RSP_HOST
+void w2c_env_n64w_gfx_task(struct w2c_env *env, uint32_t task, uint32_t frame)
+{
+    unsigned long long start = PROF_TICKS();
+
+    gPortFrameCount = frame;
+    port_gfx_run_guest_task(task);
+    gPortGfxTicks += PROF_TICKS() - start;
+}
+
+void w2c_env_n64w_gfx_swap(struct w2c_env *env)
+{
+    port_gfx_set_framebuffer(NULL);
+}
+
+void w2c_env_n64w_gfx_set_lod(struct w2c_env *env, uint32_t mode)
+{
+    port_gfx_set_lod((int)mode);
+}
+
+uint32_t w2c_env_n64w_gfx_lod(struct w2c_env *env)
+{
+    return (uint32_t)port_gfx_lod();
+}
+
+void w2c_env_n64w_audio_task(struct w2c_env *env, uint32_t cmds, uint32_t count)
+{
+    unsigned long long start = PROF_TICKS();
+
+    port_audio_run_guest_abi1(cmds, count);
+    gPortAudioTicks += PROF_TICKS() - start;
+}
+#else
+/* (the module renders itself; these are never called) */
+void w2c_env_n64w_gfx_task(struct w2c_env *env, uint32_t task, uint32_t frame) {}
+void w2c_env_n64w_gfx_swap(struct w2c_env *env) {}
+void w2c_env_n64w_gfx_set_lod(struct w2c_env *env, uint32_t mode) {}
+uint32_t w2c_env_n64w_gfx_lod(struct w2c_env *env)
+{
+    return 0;
+}
+void w2c_env_n64w_audio_task(struct w2c_env *env, uint32_t cmds, uint32_t count) {}
+#endif
+
 /* ---- coroutines --------------------------------------------------------------------------------- */
 #define N64W_CORO_MAX 64
 
@@ -154,7 +234,7 @@ uint32_t w2c_env_n64w_coro_create(struct w2c_env *env, uint32_t entry, uint32_t 
             sCoros[i].entry = entry;
             sCoros[i].arg = arg;
             sCoros[i].sp = stack_top;
-            sCoros[i].native = port_coro_create(coro_main, &sCoros[i], 1024 * 1024);
+            sCoros[i].native = port_coro_create(coro_main, &sCoros[i], N64W_HOST_STACK);
             return i;
         }
     }
@@ -207,6 +287,18 @@ static void instantiate(void)
     wasm_rt_init();
     N64W_CAT(N64W_CAT(wasm2c_, N64W_MODULE), _instantiate)(&sInstance, &sEnv);
     sMem = sInstance.w2c_memory.data;
+#ifdef PORT_RSP_HOST
+    gPortGuestMem = sMem;
+    gPortGfxTraceFrame = (unsigned int)port_env_int("SSB64_GFX_TRACE");
+#endif
+    /* The stack ends the module's memory (wasm_link: data, arena, then the stack): it all has
+     * to fit the window, or the top of it would fold onto the bottom (N64W_OFFSET). */
+    if (sInstance.STACK_POINTER - 0x80000000u > N64W_WINDOW_MASK)
+    {
+        port_fatal("the game needs %u KB of guest memory, the window holds %u KB (N64PORT_WASM_WINDOW_MB / "
+                   "N64PORT_WASM_ARENA_MB)", (unsigned)((sInstance.STACK_POINTER - 0x80000000u) >> 10),
+                   (unsigned)((N64W_WINDOW_MASK + 1u) >> 10));
+    }
     GUEST(0x5F_wasm_call_ctors)(&sInstance); /* byte-swaps the initialised data (be_fixup.c) */
     sInstantiated = 1;
 }
@@ -256,6 +348,9 @@ void n64_run_frame(void)
     if (sInstantiated)
     {
         GUEST(n64w_run_frame)(&sInstance);
+#if defined(PORT_RSP_HOST) && defined(PORT_GFX_GPU)
+        port_gpu_host_idle(); /* the host draws next */
+#endif
     }
 }
 
@@ -263,6 +358,7 @@ void n64_shutdown(void)
 {
 }
 
+#ifndef PORT_RSP_HOST /* (otherwise port_gfx.c's own) */
 const unsigned char *n64_framebuffer(int *width, int *height)
 {
     uint32_t fb;
@@ -282,6 +378,7 @@ int n64_draws_to_screen(void)
 {
     return 0;
 }
+#endif
 
 const short *n64_audio(int *frames, int *sample_rate)
 {

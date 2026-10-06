@@ -16,7 +16,9 @@
 
 #include <stdint.h>
 
-#define N64W_WINDOW_MASK 0x03FFFFFFu /* 64 MB */
+#ifndef N64W_WINDOW_MASK
+#define N64W_WINDOW_MASK 0x03FFFFFFu /* 64 MB; smaller on consoles (N64PORT_WASM_WINDOW_MB) */
+#endif
 #define N64W_OFFSET(a) ((uint32_t)(a) & N64W_WINDOW_MASK)
 /* room for an access of up to 16 bytes at the last address */
 #define N64W_MEM_BYTES (N64W_WINDOW_MASK + 1u + 16u)

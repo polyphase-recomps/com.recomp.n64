@@ -27,6 +27,8 @@ s32 port_gfx_lod(void);
 
 /* port_audio.c (or port_audio_stub.c): the audio microcode, the DAC and audio heap addresses */
 void port_audio_run_task(OSTask *task);
+/* port_audio_abi1.c: an aspMain ("ABI 1") command list */
+void port_audio_abi1_run(const void *cmds, u32 count);
 void port_audio_submit(void *samples, u32 size);
 void port_audio_frame_begin(void);
 u32 port_audio_ai_length(void);

@@ -21,6 +21,14 @@ int gPortContainFaults;
 int gPortFaulted;
 int gPortFaultGuard;
 int gPortVerbose; /* bring-up aid: backends log what they are doing while this is set */
+unsigned long long gPortGfxProfile[8];
+
+#if !defined(__3DS__)
+unsigned long long port_ticks(void)
+{
+    return 0;
+}
+#endif
 /* Bring-up aid: how often the game has gone through the main runtime entry points. A hang
  * report prints them twice; the ones still counting are where a busy loop is going round. */
 unsigned int gPortProgress[8];
@@ -139,6 +147,34 @@ void *port_arena_alloc(unsigned long long size, unsigned long long align)
     sArenaUsed = end;
     memset(sArenaBase + start, 0, size);
     return sArenaBase + start;
+}
+
+/* Bounds of the module's code and data, from symbols its linker script defines. */
+#if defined(__3DS__)
+extern char __start__[], __end__[];
+#define IMAGE_START __start__
+#define IMAGE_END __end__
+#elif defined(__ELF__) && !defined(GEKKO)
+extern char __ehdr_start[], _end[];
+#define IMAGE_START __ehdr_start
+#define IMAGE_END _end
+#endif
+
+int port_addr_is_native(const void *p)
+{
+    const unsigned char *addr = p;
+
+    if (sArenaBase != NULL && addr >= sArenaBase && addr < sArenaBase + PORT_ARENA_SIZE)
+    {
+        return 1;
+    }
+#ifdef IMAGE_START
+    if (addr >= (const unsigned char *)IMAGE_START && addr < (const unsigned char *)IMAGE_END)
+    {
+        return 1;
+    }
+#endif
+    return 0;
 }
 
 void port_arena_reset(void)

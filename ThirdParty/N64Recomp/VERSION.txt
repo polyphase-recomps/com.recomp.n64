@@ -1,0 +1,8 @@
+N64Recomp vendored snapshot (trimmed). Update with ThirdParty/update_n64recomp.ps1.
+fetched: 2026-10-05
+N64Recomp  https://github.com/N64Recomp/N64Recomp  ffb39cdad1da5de07eaaa48bd1db4a89a7986771
+ELFIO  https://github.com/serge1/ELFIO  ad8b641f9682b6091ba8b9f7c8152255c1a2c803
+fmt  https://github.com/fmtlib/fmt  407c905e45ad75fc29bf0f9bb7c5c2fd3475976f
+rabbitizer  https://github.com/Decompollaborate/rabbitizer  e0d8003047938e2ec3697eaf8d61a84d11d17b43
+sljit  https://github.com/zherczeg/sljit  f6326087b3404efb07c6d3deed97b3c3b8098c0c
+tomlplusplus  https://github.com/marzer/tomlplusplus  1f7884e59165e517462f922e7b6de131bd9844f3

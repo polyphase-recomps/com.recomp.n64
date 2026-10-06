@@ -56,7 +56,7 @@ struct GamePackage
 struct GameStatus
 {
     std::string id;
-    bool windowsLib, linuxLib, wiiLib, gameCubeLib, assetPack;
+    bool windowsLib, linuxLib, wiiLib, gameCubeLib, n3dsLib, assetPack;
 };
 
 std::mutex sLock;
@@ -103,6 +103,20 @@ std::string ProjectDir()
         dir += "/";
     }
     return dir;
+}
+
+// Whether a text file mentions `needle` (false if it cannot be read).
+bool FileMentions(const std::string& path, const char* needle)
+{
+    std::ifstream in(path.c_str(), std::ios::binary);
+    std::stringstream text;
+
+    if (!in.is_open())
+    {
+        return false;
+    }
+    text << in.rdbuf();
+    return text.str().find(needle) != std::string::npos;
 }
 
 bool Exists(const std::string& path)
@@ -325,7 +339,7 @@ std::vector<GameStatus> GetStatus()
         const std::string package = game.nativeDir + "../";
         status.push_back({game.id, AnyFile(package + "Lib/*.lib"), AnyFile(package + "Lib/Linux/*.a"),
                           AnyFile(package + "Lib/Wii/*.a"), AnyFile(package + "Lib/GameCube/*.a"),
-                          AnyFile(package + "Assets/*.n64pak")});
+                          AnyFile(package + "Lib/3DS/*.a"), AnyFile(package + "Assets/*.n64pak")});
     }
     return status;
 }
@@ -338,6 +352,7 @@ const char* PlatformName(int32_t platform)
     case Platform::Linux: return "Linux";
     case Platform::Wii: return "Wii";
     case Platform::GameCube: return "GameCube";
+    case Platform::N3DS: return "3DS";
     default: return nullptr;
     }
 }
@@ -367,6 +382,11 @@ bool SetupGame(const GamePackage& game, int32_t platform, const std::string& dec
         Emit("[n64] " + game.id + ": the game is not built for this platform; its addon uses its stub there", background);
         return true;
     }
+    if ((Platform)platform == Platform::N3DS && !FileMentions(game.nativeDir + "build-console.ps1", "'3DS'"))
+    {
+        Emit("[n64] " + game.id + ": no 3DS build for this game; its addon uses its stub there", background);
+        return true;
+    }
 #if PLATFORM_WINDOWS
     const std::string decompArg = decomp.empty() ? "" : "-Decomp \"" + decomp + "\"";
 
@@ -376,8 +396,11 @@ bool SetupGame(const GamePackage& game, int32_t platform, const std::string& dec
     }
     else
     {
-        // The other builds reuse files the Windows build generates.
-        if (!Exists(game.nativeDir + "build/RelWithDebInfo/gen/port_reloc_table.c"))
+        // Some games' other builds reuse files their Windows build generates (Smash Bros.: its
+        // console script stops with "run .\build.ps1 first" without them); the others build on
+        // their own.
+        if (FileMentions(game.nativeDir + "build-console.ps1", "build.ps1 first") &&
+            !Exists(game.nativeDir + "build/RelWithDebInfo/gen/port_reloc_table.c"))
         {
             ok = RunPowerShell(game, "build.ps1", decompArg, background);
         }
@@ -594,9 +617,9 @@ void N64Dependencies::DrawTargetOptions(const PolyphaseBuildContext* ctx)
     }
     for (const GameStatus& game : sStatus)
     {
-        ImGui::Text("%s:  Windows %s   Linux %s   Wii %s   GameCube %s   assets %s", game.id.c_str(),
+        ImGui::Text("%s:  Windows %s   Linux %s   Wii %s   GameCube %s   3DS %s   assets %s", game.id.c_str(),
                     game.windowsLib ? "built" : "-", game.linuxLib ? "built" : "-", game.wiiLib ? "built" : "-",
-                    game.gameCubeLib ? "built" : "-", game.assetPack ? "extracted" : "MISSING");
+                    game.gameCubeLib ? "built" : "-", game.n3dsLib ? "built" : "-", game.assetPack ? "extracted" : "MISSING");
     }
     if (sStatus.empty())
     {

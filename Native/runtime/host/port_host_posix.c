@@ -3,7 +3,7 @@
  * that only ever runs while its resumer waits, so the game stays single-threaded in effect.
  * Faults are not contained here; a crash ends the process.
  */
-#if !defined(_WIN32) && !defined(GEKKO)
+#if !defined(_WIN32) && !defined(GEKKO) && !defined(__3DS__)
 #include <limits.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -12,6 +12,10 @@
 
 #include "port_host.h"
 #include "port_host_plat.h"
+
+#ifndef PTHREAD_STACK_MIN /* (newlib on the 3DS) */
+#define PTHREAD_STACK_MIN 16384
+#endif
 
 void port_plat_abort(void)
 {
@@ -63,6 +67,124 @@ int port_plat_arena_commit(unsigned char *addr, unsigned long long size)
     return 1; /* the whole reservation is usable and reads as zero */
 }
 
+#if defined(__3DS__)
+/* ---- coroutines (3DS) ------------------------------------------------------- */
+/* newlib's pthread condition variables do not hand control over reliably here: each
+ * coroutine is a libctru thread, and control passes with two light semaphores. */
+#include <3ds.h>
+
+struct PortCoro
+{
+    Thread thread;
+    LightSemaphore go;   /* released to let the coroutine run */
+    LightSemaphore back; /* released when it yields or finishes */
+    void (*entry)(void *);
+    void *arg;
+    volatile int kill;   /* destroyed while suspended: unwind instead of continuing */
+    volatile int finished;
+};
+
+static PortCoro *sCurrentCoro;
+
+static void coro_wait_turn(PortCoro *coro)
+{
+    LightSemaphore_Acquire(&coro->go, 1);
+    if (coro->kill)
+    {
+        threadExit(0);
+    }
+}
+
+static void coro_trampoline(void *param)
+{
+    PortCoro *coro = param;
+
+    coro_wait_turn(coro);
+    coro->entry(coro->arg);
+    coro->finished = 1;
+    LightSemaphore_Release(&coro->back, 1);
+}
+
+PortCoro *port_coro_create(void (*entry)(void *), void *arg, unsigned long long stack_size)
+{
+    PortCoro *coro = calloc(1, sizeof(*coro));
+    s32 priority = 0x30;
+
+    coro->entry = entry;
+    coro->arg = arg;
+    LightSemaphore_Init(&coro->go, 0, 1);
+    LightSemaphore_Init(&coro->back, 0, 1);
+    /* the same priority and core as the caller: only one of them runs at a time anyway */
+    svcGetThreadPriority(&priority, CUR_THREAD_HANDLE);
+    coro->thread = threadCreate(coro_trampoline, coro, (size_t)((stack_size + 7) & ~7ull), priority, -2, false);
+    if (coro->thread == NULL)
+    {
+        port_fatal("threadCreate failed (%u KB stack)", (unsigned)(stack_size >> 10));
+    }
+    return coro;
+}
+
+void port_coro_destroy(PortCoro *coro)
+{
+    if (coro != NULL)
+    {
+        if (!coro->finished)
+        {
+            coro->kill = 1;
+            LightSemaphore_Release(&coro->go, 1);
+        }
+        threadJoin(coro->thread, U64_MAX);
+        threadFree(coro->thread);
+        free(coro);
+    }
+}
+
+void port_coro_resume(PortCoro *coro)
+{
+    PortCoro *previous = sCurrentCoro;
+
+    if (coro->finished)
+    {
+        return;
+    }
+    sCurrentCoro = coro;
+    LightSemaphore_Release(&coro->go, 1);
+    LightSemaphore_Acquire(&coro->back, 1);
+    sCurrentCoro = previous;
+}
+
+void port_coro_yield(void)
+{
+    PortCoro *coro = sCurrentCoro;
+
+    if (coro == NULL)
+    {
+        port_fatal("port_coro_yield outside a coroutine");
+    }
+    LightSemaphore_Release(&coro->back, 1);
+    coro_wait_turn(coro);
+}
+
+int port_coro_finished(PortCoro *coro)
+{
+    return coro->finished;
+}
+
+void port_plat_coro_abandon(void)
+{
+    PortCoro *coro = sCurrentCoro;
+
+    gPortFaulted = 1;
+    if (coro != NULL)
+    {
+        /* Never resumed again; the thread ends here and is reaped by port_coro_destroy(). */
+        coro->finished = 1;
+        LightSemaphore_Release(&coro->back, 1);
+        threadExit(0);
+    }
+}
+
+#else
 /* ---- coroutines ------------------------------------------------------------ */
 struct PortCoro
 {
@@ -213,6 +335,8 @@ void port_plat_coro_abandon(void)
         pthread_exit(NULL);
     }
 }
+
+#endif /* __3DS__ */
 
 void port_set_fault_containment(int enable)
 {

@@ -29,8 +29,68 @@ int port_env_int(const char *name)
     return n64w_env_int(name);
 }
 
+/* Profiling clock: not measured inside the guest. */
+unsigned long long port_ticks(void)
+{
+    return 0;
+}
+
+/* Guest pointers are guest addresses (0x80xxxxxx), never host memory. */
+int port_addr_is_native(const void *p)
+{
+    (void)p;
+    return 0;
+}
+
 void port_set_log_sink(void (*sink)(const char *line)) {}
 void port_set_fault_containment(int enable) {}
+
+#ifdef PORT_RSP_HOST_TASKS
+/* ---- RSP tasks: port_gfx.c and port_audio_abi1.c run in the host (PORT_RSP_HOST) ---------- */
+#include <PR/sptask.h>
+#include "port_guest.h"
+
+extern u32 gPortFrameCount;
+u32 gPortGfxTraceFrame; /* (set by port_boot.c; the host reads the same variable itself) */
+
+void port_gfx_run_task(OSTask *task)
+{
+    gPortProgress[4]++;
+    n64w_gfx_task(task, gPortFrameCount);
+}
+
+void port_gfx_set_framebuffer(void *fb)
+{
+    n64w_gfx_swap();
+}
+
+void port_gfx_set_lod(s32 mode)
+{
+    n64w_gfx_set_lod(mode);
+}
+
+s32 port_gfx_lod(void)
+{
+    return n64w_gfx_lod();
+}
+
+void port_audio_abi1_run(const void *cmds, u32 count)
+{
+    n64w_audio_task(cmds, count);
+}
+
+/* the host presents the picture */
+int n64_draws_to_screen(void)
+{
+    return 0;
+}
+
+const unsigned char *n64_framebuffer(int *width, int *height)
+{
+    *width = *height = 0;
+    return NULL;
+}
+#endif
 
 /* ---- formatting ---------------------------------------------------------------------- */
 typedef struct FmtOut

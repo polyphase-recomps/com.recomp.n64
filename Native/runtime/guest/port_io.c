@@ -320,15 +320,30 @@ void osSpTaskLoad(OSTask *task)
 
 void osSpTaskStartGo(OSTask *task)
 {
+    /* Profiling switch N64_PROF_SKIP (environment, bit mask): 1 skips graphics tasks, 2 audio
+     * tasks, 4 triangle rasterizing, 8 fill rectangles (port_gfx.c). What remains shows where
+     * the time goes on a slow target. */
+    static int sSkip = -1;
+
+    if (sSkip < 0)
+    {
+        sSkip = port_env_int("N64_PROF_SKIP");
+    }
     /* Tasks complete synchronously; their interrupts are delivered as queued messages. */
     if (task->t.type == M_AUDTASK)
     {
-        port_audio_run_task(task);
+        if (!(sSkip & 2))
+        {
+            port_audio_run_task(task);
+        }
         port_os_post_event(OS_EVENT_SP);
     }
     else
     {
-        port_gfx_run_task(task);
+        if (!(sSkip & 1))
+        {
+            port_gfx_run_task(task);
+        }
         port_os_post_event(OS_EVENT_SP);
         port_os_post_event(OS_EVENT_DP);
     }

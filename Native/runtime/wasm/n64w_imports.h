@@ -27,4 +27,13 @@ N64W_IMPORT(n64w_coro_resume) void n64w_coro_resume(unsigned int coro);
 N64W_IMPORT(n64w_coro_yield) void n64w_coro_yield(void);
 N64W_IMPORT(n64w_coro_finished) int n64w_coro_finished(unsigned int coro);
 
+/* PORT_RSP_HOST_TASKS: the graphics task interpreter (runtime/guest/port_gfx.c) and the audio
+ * microcode (port_audio_abi1.c) are native host code reading this module's memory; frame: the
+ * guest's frame counter (for its diagnostics) */
+N64W_IMPORT(n64w_gfx_task) void n64w_gfx_task(const void *task, unsigned int frame);
+N64W_IMPORT(n64w_gfx_swap) void n64w_gfx_swap(void);
+N64W_IMPORT(n64w_gfx_set_lod) void n64w_gfx_set_lod(int mode);
+N64W_IMPORT(n64w_gfx_lod) int n64w_gfx_lod(void);
+N64W_IMPORT(n64w_audio_task) void n64w_audio_task(const void *cmds, unsigned int count);
+
 #endif /* N64W_IMPORTS_H */

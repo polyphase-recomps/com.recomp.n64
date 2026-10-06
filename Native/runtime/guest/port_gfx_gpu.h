@@ -68,12 +68,23 @@ static void gpu_vertices_loaded(void)
     sVtxDepthK2 = sMP[3][2] - k1 * sMP[3][3];
 }
 
+/* FNV-style hash, a 32-bit word at a time where the data allows (texture memory is 8-byte
+ * aligned): every texture use that is not cached hashes its whole source, so this is hot. */
 static u32 gpu_hash(u32 hash, const void *data, u32 bytes)
 {
     const u8 *p = data;
-    u32 i;
+    u32 i = 0;
 
-    for (i = 0; i < bytes; i++)
+    if (((uintptr_t)p & 3) == 0)
+    {
+        const u32 *w = (const u32 *)p;
+
+        for (; i + 4 <= bytes; i += 4)
+        {
+            hash = (hash ^ *w++) * 16777619u;
+        }
+    }
+    for (; i < bytes; i++)
     {
         hash = (hash ^ p[i]) * 16777619u;
     }
@@ -117,10 +128,13 @@ static const GpuTileTex *gpu_tile_texture(s32 tile_id)
     u32 hash, base, bytes, stride;
     s32 s, t;
 
+    unsigned long long t0;
+
     if (tex->gen == sTexGen && port_gpu_texture_valid(tex->handle, tex->hash))
     {
         return tex;
     }
+    t0 = gPortVerbose ? port_ticks() : 0;
     gpu_tile_extent(tile, &tex->width, &tex->wrap_s, tile->masks, tile->cms, tile->sl, tile->sh);
     gpu_tile_extent(tile, &tex->height, &tex->wrap_t, tile->maskt, tile->cmt, tile->tl, tile->th);
     if (tex->width * tex->height > GPU_TEX_TEXELS)
@@ -135,16 +149,22 @@ static const GpuTileTex *gpu_tile_texture(s32 tile_id)
     bytes = stride * (u32)((tile->maskt != 0 && tex->height > (1 << tile->maskt)) ? (1 << tile->maskt) : tex->height);
     if (base > TMEM_SIZE) base = TMEM_SIZE;
     if (bytes > TMEM_SIZE - base) bytes = TMEM_SIZE - base;
-    hash = gpu_hash(2166136261u, &sTmem[base], bytes);
+    if (!tmem_region_sig(base, base + bytes, &hash))
+    {
+        hash = gpu_hash(2166136261u, &sTmem[base], bytes);
+    }
     if (tile->fmt == G_IM_FMT_CI)
     {
-        if (tile->siz == G_IM_SIZ_4b)
+        u32 pal = (tile->siz == G_IM_SIZ_4b) ? 0x800 + tile->palette * 32 : 0x800;
+        u32 pal_bytes = (tile->siz == G_IM_SIZ_4b) ? 32 : 512, pal_sig;
+
+        if (tmem_region_sig(pal, pal + pal_bytes, &pal_sig))
         {
-            hash = gpu_hash(hash, &sTmem[0x800 + tile->palette * 32], 32);
+            hash = tmem_mix(hash, pal_sig);
         }
         else
         {
-            hash = gpu_hash(hash, &sTmem[0x800], 512);
+            hash = gpu_hash(hash, &sTmem[pal], pal_bytes);
         }
     }
     {
@@ -163,6 +183,11 @@ static const GpuTileTex *gpu_tile_texture(s32 tile_id)
     tex->gen = sTexGen;
     tex->hash = hash;
     tex->handle = port_gpu_texture_find(hash);
+    if (gPortVerbose)
+    {
+        gPortGfxProfile[2] += port_ticks() - t0;
+        gPortGfxProfile[6]++;
+    }
     if (tex->handle != 0)
     {
         return tex;
@@ -299,37 +324,88 @@ static void gpu_set_scissor(void)
     port_gpu_scissor(sScissor[0], sScissor[1], sScissor[2], sScissor[3]);
 }
 
+/*
+ * Everything a triangle's state depends on. Triangles come in long runs with the same state,
+ * and building a PortGpuState (combiner decoding, colour conversion) for each one costs more
+ * than the rest of the triangle on slow CPUs, so it is rebuilt only when this changes.
+ */
+typedef struct GpuStateKey
+{
+    u32 combine0, combine1, mode_h, mode_l, geometry, texture, tex_gen, tex_handle;
+    PortColor prim, env, fog;
+    u32 vtx_ortho;
+    f32 k1, k2;
+} GpuStateKey;
+
+static GpuStateKey sGpuKey;
+static PortGpuState sGpuState;
+static sb32 sGpuStateOk;
+static f32 sGpuTexMul[2], sGpuTexAdd[2]; /* s = v->s * mul + add (tile shift, origin, size) */
+
+static f32 gpu_shift_scale(u32 shift)
+{
+    if (shift == 0) return 1.0F;
+    return (shift <= 10) ? 1.0F / (f32)(1 << shift) : (f32)(1 << (16 - shift));
+}
+
 static void gpu_triangle(s32 i0, s32 i1, s32 i2)
 {
     const GpuTileTex *tex = sTextureOn ? gpu_tile_texture(sTextureTile) : NULL;
-    const PortTile *tile = &sTiles[sTextureTile & 7];
     const s32 index[3] = { i0, i1, i2 };
-    PortGpuState st;
+    GpuStateKey key;
     PortGpuVtx out[3];
+    const u32 *ka, *kb;
+    u32 n;
     s32 i;
 
-    gpu_state_combined(&st, tex);
     if ((sGeometryMode & G_CULL_BACK) && (sGeometryMode & G_CULL_FRONT))
     {
         return;
     }
-    st.cull = (sGeometryMode & G_CULL_BACK) ? PORT_GPU_CULL_BACK : (sGeometryMode & G_CULL_FRONT) ? PORT_GPU_CULL_FRONT : PORT_GPU_CULL_NONE;
-    if (sGeometryMode & G_ZBUFFER)
+    key.combine0 = sCombineW0; key.combine1 = sCombineW1;
+    key.mode_h = sOtherModeH; key.mode_l = sOtherModeL;
+    key.geometry = sGeometryMode;
+    key.texture = (sTextureOn << 8) | sTextureTile;
+    key.tex_gen = (tex != NULL) ? sTexGen : 0;
+    key.tex_handle = (tex != NULL) ? tex->handle : 0;
+    key.prim = sPrim; key.env = sEnv; key.fog = sFog;
+    key.vtx_ortho = sVtxOrtho | (sVtxDivide << 1);
+    key.k1 = sVtxDepthK1; key.k2 = sVtxDepthK2;
+    ka = (const u32 *)&key;
+    kb = (const u32 *)&sGpuKey;
+    for (n = 0; n < sizeof(key) / 4 && ka[n] == kb[n]; n++)
     {
-        st.z_test = (sOtherModeL & Z_CMP) != 0;
-        st.z_write = (sOtherModeL & Z_UPD) != 0;
-        st.decal = st.z_test && (sOtherModeL & ZMODE_DEC) == ZMODE_DEC;
     }
-    st.ortho = sVtxOrtho;
-    st.depth_k1 = sVtxDepthK1;
-    st.depth_k2 = sVtxDepthK2;
-    if (sVtxDivide)
+    if (!sGpuStateOk || n != sizeof(key) / 4)
     {
-        if (sVtx[i0].w <= 0.0F || sVtx[i1].w <= 0.0F || sVtx[i2].w <= 0.0F)
+        PortGpuState *st = &sGpuState;
+
+        gpu_state_combined(st, tex);
+        st->cull = (sGeometryMode & G_CULL_BACK) ? PORT_GPU_CULL_BACK : (sGeometryMode & G_CULL_FRONT) ? PORT_GPU_CULL_FRONT : PORT_GPU_CULL_NONE;
+        if (sGeometryMode & G_ZBUFFER)
         {
-            return; /* would need clipping against the eye plane */
+            st->z_test = (sOtherModeL & Z_CMP) != 0;
+            st->z_write = (sOtherModeL & Z_UPD) != 0;
+            st->decal = st->z_test && (sOtherModeL & ZMODE_DEC) == ZMODE_DEC;
         }
-        st.ortho = TRUE;
+        st->ortho = sVtxDivide ? TRUE : sVtxOrtho;
+        st->depth_k1 = sVtxDepthK1;
+        st->depth_k2 = sVtxDepthK2;
+        if (tex != NULL)
+        {
+            const PortTile *tile = &sTiles[sTextureTile & 7];
+
+            sGpuTexMul[0] = gpu_shift_scale(tile->shifts) / (f32)tex->width;
+            sGpuTexAdd[0] = -tile->sl / (f32)tex->width;
+            sGpuTexMul[1] = gpu_shift_scale(tile->shiftt) / (f32)tex->height;
+            sGpuTexAdd[1] = -tile->tl / (f32)tex->height;
+        }
+        sGpuKey = key;
+        sGpuStateOk = TRUE;
+    }
+    if (sVtxDivide && (sVtx[i0].w <= 0.0F || sVtx[i1].w <= 0.0F || sVtx[i2].w <= 0.0F))
+    {
+        return; /* would need clipping against the eye plane */
     }
 
     for (i = 0; i < 3; i++)
@@ -339,8 +415,8 @@ static void gpu_triangle(s32 i0, s32 i1, s32 i2)
         out[i].x = v->x; out[i].y = v->y; out[i].z = v->z; out[i].w = v->w;
         if (tex != NULL)
         {
-            out[i].s = (tex_shift(v->s, tile->shifts) - tile->sl) / (f32)tex->width;
-            out[i].t = (tex_shift(v->t, tile->shiftt) - tile->tl) / (f32)tex->height;
+            out[i].s = v->s * sGpuTexMul[0] + sGpuTexAdd[0];
+            out[i].t = v->t * sGpuTexMul[1] + sGpuTexAdd[1];
         }
         else
         {
@@ -351,7 +427,7 @@ static void gpu_triangle(s32 i0, s32 i1, s32 i2)
     }
     port_gpu_viewport(sVpTrans[0] - sVpScale[0], sVpTrans[1] - sVpScale[1], sVpScale[0] * 2.0F, sVpScale[1] * 2.0F);
     gpu_set_scissor();
-    port_gpu_draw(&st, out, 3);
+    port_gpu_draw(&sGpuState, out, 3);
     sStatTris++;
 }
 

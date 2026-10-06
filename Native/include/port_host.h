@@ -31,11 +31,23 @@ extern unsigned int gPortProgress[8];
 
 int port_env_int(const char *name);
 
+/* Bring-up aid: a fast free-running counter (CPU ticks where the platform has one, else 0) and
+ * the display list interpreter's time split, filled while gPortVerbose is set:
+ * [0] vertices, [1] texture loads, [2] texture lookups that hashed, [3] decodes; [4..7] counts. */
+unsigned long long port_ticks(void);
+extern unsigned long long gPortGfxProfile[8];
+
 /* ---- memory ------------------------------------------------------------ */
 /* Zeroed memory within 4 GB above the module image (tokenisable, see port_prelude.h). */
 void *port_arena_alloc(unsigned long long size, unsigned long long align);
 void port_arena_reset(void);
 unsigned long long port_arena_used(void); /* bytes handed out so far */
+/*
+ * Whether an address is the port's own memory (the arena) or the module's data rather than an
+ * N64 segmented address (segment << 24 | offset). Only needed on 32-bit hosts whose memory
+ * starts below 0x10000000 (3DS, ARM Linux), where the two can look alike.
+ */
+int port_addr_is_native(const void *p);
 
 void port_memcpy(void *dst, const void *src, unsigned long long size);
 void port_memset(void *dst, int value, unsigned long long size);
@@ -101,6 +113,9 @@ const unsigned char *n64_framebuffer(int *width, int *height);
 /* Non-zero when a GPU backend draws the game straight into the host's render target instead:
  * there is no framebuffer to show, and each host frame needs at least one game frame. */
 int n64_draws_to_screen(void);
+/* While set, the game's display lists are not drawn (its logic still runs): a host that runs
+ * several game frames before showing one skips drawing all but the last. */
+void n64_set_skip_draw(int skip);
 /* GPU backends: where the game's picture goes in the host's render target, in its pixels
  * (resolution scaler). width <= 0 = the whole target. No effect with the software renderer. */
 void n64_set_display_rect(float x, float y, float width, float height);

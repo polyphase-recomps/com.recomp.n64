@@ -32,14 +32,27 @@ option(N64PORT_AUDIO "Build the audio microcode / output layer (port_audio.c)" O
 
 file(GLOB N64PORT_GUEST_SOURCES CONFIGURE_DEPENDS "${N64PORT_DIR}/runtime/guest/*.c")
 if(NOT N64PORT_AUDIO)
-    list(REMOVE_ITEM N64PORT_GUEST_SOURCES "${N64PORT_DIR}/runtime/guest/port_audio.c")
+    list(REMOVE_ITEM N64PORT_GUEST_SOURCES "${N64PORT_DIR}/runtime/guest/port_audio.c"
+        "${N64PORT_DIR}/runtime/guest/port_audio_abi1.c")
 endif()
 # Every backend is compiled everywhere; each one is wrapped in its own platform guard.
 file(GLOB N64PORT_HOST_SOURCES CONFIGURE_DEPENDS "${N64PORT_DIR}/runtime/host/*.c")
+if(N64PORT_CONSOLE STREQUAL "3DS")
+    # The citro3d backend's vertex shader, assembled with picasso and embedded as C data.
+    set(_shbin "${CMAKE_BINARY_DIR}/gen/port_gpu_c3d.shbin")
+    set(_shbin_c "${CMAKE_BINARY_DIR}/gen/port_gpu_c3d_shbin.c")
+    add_custom_command(OUTPUT "${_shbin_c}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_BINARY_DIR}/gen"
+        COMMAND "${N64PORT_PICASSO}" -o "${_shbin}" "${N64PORT_DIR}/runtime/host/port_gpu_c3d.v.pica"
+        COMMAND "${Python3_EXECUTABLE}" "${N64PORT_DIR}/tools/bin2c.py" "${_shbin}" "${_shbin_c}" n64port_c3d_shbin
+        DEPENDS "${N64PORT_DIR}/runtime/host/port_gpu_c3d.v.pica" "${N64PORT_DIR}/tools/bin2c.py"
+        VERBATIM)
+    list(APPEND N64PORT_HOST_SOURCES "${_shbin_c}")
+endif()
 
 # The renderer and the audio mixer are inner loops; optimise them whatever the game code uses.
 set_source_files_properties("${N64PORT_DIR}/runtime/guest/port_gfx.c" "${N64PORT_DIR}/runtime/guest/port_audio.c"
-    PROPERTIES COMPILE_OPTIONS "-O2")
+    "${N64PORT_DIR}/runtime/guest/port_audio_abi1.c" PROPERTIES COMPILE_OPTIONS "-O2")
 # Debug aid (GCC / clang on ELF): report undefined behaviour in the renderer and the mixer.
 option(N64PORT_SANITIZE "Build port_gfx.c / port_audio.c with the undefined behaviour sanitizer" OFF)
 if(N64PORT_SANITIZE)
@@ -101,6 +114,10 @@ if(N64PORT_CONSOLE MATCHES "Wii|GameCube")
     # turns a byte-wise float read from a byte stream (lbParticleReadFloatBigEnd) into `lfs`.
     list(APPEND N64PORT_DECOMP_FLAGS -mstrict-align)
 endif()
+if(N64PORT_CONSOLE STREQUAL "3DS")
+    # Only aligned accesses (the ARM11 faults on unaligned multi-word and VFP loads).
+    list(APPEND N64PORT_DECOMP_FLAGS -mno-unaligned-access)
+endif()
 
 function(n64port_decomp_objects name)
     add_library(${name} OBJECT ${ARGN})
@@ -160,8 +177,9 @@ function(n64port_overlay_sections)
         return()
     endif()
     set(launcher "${Python3_EXECUTABLE}" "${N64PORT_DIR}/tools/cc_overlay.py" "${CMAKE_OBJCOPY}")
-    if(N64PORT_CONSOLE MATCHES "Wii|GameCube")
-        # libogc's linker script puts unknown no-load sections after .bss, inside the heap.
+    if(N64PORT_CONSOLE MATCHES "Wii|GameCube|3DS")
+        # libogc's linker script puts unknown no-load sections after .bss, inside the heap;
+        # 3dsxtool only carries what lies inside the code / rodata / data segments.
         list(APPEND launcher "--bss-as-data")
     endif()
     list(APPEND launcher "--")
@@ -187,22 +205,30 @@ include("${CMAKE_CURRENT_LIST_DIR}/N64Wasm.cmake")
 # the engine's calls bind to them. After the library is built, every symbol it shares with
 # those libraries is renamed n64_<name> inside it (tools/isolate_symbols.py).
 function(n64port_isolate_system_symbols target)
-    if(NOT N64PORT_CONSOLE MATCHES "Wii|GameCube")
+    if(NOT N64PORT_CONSOLE MATCHES "Wii|GameCube|3DS")
         return()
     endif()
     execute_process(COMMAND "${CMAKE_C_COMPILER}" -print-file-name=libc.a OUTPUT_VARIABLE libc OUTPUT_STRIP_TRAILING_WHITESPACE)
     execute_process(COMMAND "${CMAKE_C_COMPILER}" -print-file-name=libm.a OUTPUT_VARIABLE libm OUTPUT_STRIP_TRAILING_WHITESPACE)
+    # <triplet>-gcc -> <triplet>-nm, next to it
     get_filename_component(nm_dir "${CMAKE_C_COMPILER}" DIRECTORY)
-    set(nm "${nm_dir}/powerpc-eabi-nm${CMAKE_EXECUTABLE_SUFFIX}")
+    get_filename_component(cc_name "${CMAKE_C_COMPILER}" NAME_WE)
+    string(REGEX REPLACE "gcc$" "nm" nm_name "${cc_name}")
+    set(nm "${nm_dir}/${nm_name}${CMAKE_EXECUTABLE_SUFFIX}")
     if(CMAKE_HOST_WIN32)
-        set(nm "${nm_dir}/powerpc-eabi-nm.exe")
+        set(nm "${nm_dir}/${nm_name}.exe")
     endif()
-    # both libogc flavours: the engine links libogc on Wii and libogc2 on GameCube
-    file(GLOB ogc_libs "${DEVKITPRO}/libogc/lib/wii/*.a" "${DEVKITPRO}/libogc/lib/cube/*.a"
-                       "${DEVKITPRO}/libogc2/*/lib/*.a" "${N64PORT_OGC_LIBDIR}/*.a")
+    if(N64PORT_CONSOLE STREQUAL "3DS")
+        # libctru brings its own os* functions (osGetTime ...) that share libultra's names
+        file(GLOB system_libs "${N64PORT_CTRULIB}/lib/*.a")
+    else()
+        # both libogc flavours: the engine links libogc on Wii and libogc2 on GameCube
+        file(GLOB system_libs "${DEVKITPRO}/libogc/lib/wii/*.a" "${DEVKITPRO}/libogc/lib/cube/*.a"
+                              "${DEVKITPRO}/libogc2/*/lib/*.a" "${N64PORT_OGC_LIBDIR}/*.a")
+    endif()
     add_custom_command(TARGET ${target} POST_BUILD
         COMMAND "${Python3_EXECUTABLE}" "${N64PORT_DIR}/tools/isolate_symbols.py" "${nm}" "${CMAKE_OBJCOPY}"
-                "$<TARGET_FILE:${target}>" "${libc}" "${libm}" ${ogc_libs}
+                "$<TARGET_FILE:${target}>" "${libc}" "${libm}" ${system_libs}
         VERBATIM)
 endfunction()
 
@@ -210,6 +236,19 @@ endfunction()
 # Headless runner
 # ---------------------------------------------------------------------------
 function(n64port_add_host_exe name library)
+    if(N64PORT_CONSOLE STREQUAL "3DS")
+        # Standalone 3DS runner (no engine); see host/main_ctr.c.
+        add_executable(${name} "${N64PORT_DIR}/host/main_ctr.c")
+        set_target_properties(${name} PROPERTIES SUFFIX ".elf")
+        target_include_directories(${name} PRIVATE "${N64PORT_INCLUDE_DIR}")
+        target_link_directories(${name} PRIVATE "${N64PORT_CTRULIB}/lib")
+        target_link_options(${name} PRIVATE -specs=3dsx.specs "-Wl,-Map,${CMAKE_BINARY_DIR}/${name}.map")
+        target_link_libraries(${name} PRIVATE ${library} citro3d ctru m)
+        add_custom_command(TARGET ${name} POST_BUILD
+            COMMAND "${N64PORT_3DSXTOOL}" "$<TARGET_FILE:${name}>" "${CMAKE_BINARY_DIR}/${name}.3dsx"
+            VERBATIM)
+        return()
+    endif()
     if(N64PORT_CONSOLE MATCHES "Wii|GameCube")
         # Standalone console runner (no engine); see host/main_ogc.c.
         add_executable(${name} "${N64PORT_DIR}/host/main_ogc.c")
