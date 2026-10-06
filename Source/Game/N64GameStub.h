@@ -18,6 +18,7 @@ void port_set_fault_containment(int) {}
 void port_set_development(int) {}
 
 void n64_set_save_path(const char*) {}
+void n64_set_recomp_dir(const char*) {}
 int n64_boot(const char*) { return 0; }
 int n64_is_running(void) { return 0; }
 void n64_set_pad(int, const PortPad*) {}

@@ -7,6 +7,7 @@
  */
 #if defined(GEKKO)
 #include <gccore.h>
+#include <ogc/lwp_watchdog.h>
 #include <malloc.h>
 #include <setjmp.h>
 #include <stdlib.h>
@@ -18,6 +19,12 @@
 void port_plat_abort(void)
 {
     abort();
+}
+
+/* the time base (TB_TIMER_CLOCK kHz: bus clock / 4) */
+unsigned long long port_ticks(void)
+{
+    return gettime();
 }
 
 /* ---- arena ----------------------------------------------------------------- */

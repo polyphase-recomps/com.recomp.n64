@@ -110,6 +110,11 @@ typedef struct PortPad
 /* Where the cartridge's save RAM is kept between runs; set before n64_boot(). Without a path
  * (the default) save data lives in memory only. */
 void n64_set_save_path(const char *path);
+/* A recompiled game built for live recompilation (Recomp (live) mode): the folder holding its
+ * recompiler data (game.json, the N64Recomp config and symbol files it names). n64_boot()
+ * recompiles the ROM it is given from those; set before it. Other builds ignore it. */
+void n64_set_recomp_dir(const char *path);
+const char *port_recomp_dir(void); /* "" until set */
 int n64_boot(const char *rom_path);
 /* 0 until booted; stays 1 after a contained fault, when n64_run_frame() becomes a no-op. */
 int n64_is_running(void);

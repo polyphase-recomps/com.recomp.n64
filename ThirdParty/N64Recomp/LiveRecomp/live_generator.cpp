@@ -1431,6 +1431,12 @@ void N64Recomp::LiveGenerator::emit_function_call(const Context&, size_t functio
     // Load rdram and ctx into R0 and R1.
     sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R0, 0, Registers::rdram, 0, SLJIT_IMM, rdram_offset);
     sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, Registers::ctx, 0);
+    // com.recomp.n64: a function the host implements (no recompiled body): call it directly.
+    auto external_it = inputs.external_functions.find(function_index);
+    if (external_it != inputs.external_functions.end()) {
+        sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS2V(P, P), SLJIT_IMM, sljit_sw(external_it->second));
+        return;
+    }
     // Call the function and save the jump to set its label later on.
     sljit_jump* call_jump = sljit_emit_call(compiler, SLJIT_CALL, SLJIT_ARGS2V(P, P));
     context->inner_calls.emplace_back(InnerCall{ .target_func_index = function_index, .jump = call_jump });
@@ -1443,9 +1449,24 @@ void N64Recomp::LiveGenerator::emit_named_function_call(const std::string& funct
 }
 
 void N64Recomp::LiveGenerator::emit_goto(const std::string& target) const {
-    sljit_jump* jump = sljit_emit_jump(compiler, SLJIT_JUMP);
     // Check if the label already exists.
     auto find_it = context->labels.find(target);
+    // com.recomp.n64: a jump to a label already placed is a loop's back edge. Count it against the
+    // host's loop budget, and let the host preempt the loop when that runs out.
+    if (find_it != context->labels.end() && inputs.loop_budget != nullptr && inputs.loop_preempt != nullptr) {
+        sljit_emit_op1(compiler, SLJIT_MOV_S32, SLJIT_R0, 0, SLJIT_MEM0(), sljit_sw(inputs.loop_budget));
+        sljit_emit_op2(compiler, SLJIT_SUB32, SLJIT_R0, 0, SLJIT_R0, 0, SLJIT_IMM, 1);
+        sljit_emit_op1(compiler, SLJIT_MOV32, SLJIT_MEM0(), sljit_sw(inputs.loop_budget), SLJIT_R0, 0);
+        sljit_jump* in_budget = sljit_emit_cmp(compiler, SLJIT_SIG_GREATER_EQUAL | SLJIT_32, SLJIT_R0, 0, SLJIT_IMM, 0);
+        sljit_set_label(in_budget, find_it->second);
+        // labels are named L_<vram>
+        uint32_t loop_vram = (target.size() > 2) ? (uint32_t)std::stoul(target.substr(2), nullptr, 16) : 0;
+        sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R0, 0, Registers::rdram, 0, SLJIT_IMM, rdram_offset);
+        sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, Registers::ctx, 0);
+        sljit_emit_op1(compiler, SLJIT_MOV32, SLJIT_R2, 0, SLJIT_IMM, (sljit_s32)loop_vram);
+        sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS3V(P, P, 32), SLJIT_IMM, sljit_sw(inputs.loop_preempt));
+    }
+    sljit_jump* jump = sljit_emit_jump(compiler, SLJIT_JUMP);
     if (find_it != context->labels.end()) {
         sljit_set_label(jump, find_it->second);
     }

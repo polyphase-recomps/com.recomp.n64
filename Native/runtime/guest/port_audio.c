@@ -43,8 +43,10 @@ static u8 *audio_ram(u32 addr)
     return gRecompRdram + (addr & 0x00FFFFFF);
 }
 
-#define DMEM_BYTE(offset) ((offset) ^ 1)
-#define RAM_BYTE(p) (*(u8 *)((uintptr_t)(p) ^ 3))
+/* DMEM holds native 16-bit samples: on a little-endian host a byte's place in its sample is
+ * flipped; RDRAM bytes as recomp_layout.h places them */
+#define DMEM_BYTE(offset) ((offset) ^ (RECOMP_HOST_BE ? 0u : 1u))
+#define RAM_BYTE(p) (*(u8 *)((uintptr_t)(p) ^ RECOMP_XOR8))
 #else
 #define DMEM_BYTE(offset) (offset)
 

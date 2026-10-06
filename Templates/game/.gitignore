@@ -8,6 +8,8 @@ build/
 *.n64
 *.v64
 *.n64pak
+# Recomp (live) data: copied from Recomp/ by build_recomp.ps1 -Live
+/Assets/Recomp/Live/
 
 # --- Tooling -----------------------------------------------------------------------------
 __pycache__/

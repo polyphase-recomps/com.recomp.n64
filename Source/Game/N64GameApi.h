@@ -50,6 +50,9 @@ void port_set_fault_containment(int enable);
 void port_set_development(int on);
 
 void n64_set_save_path(const char* path);
+// Recomp (live) builds: the folder with the game's recompiler data (game.json, the N64Recomp
+// config, the symbols); n64_boot recompiles the ROM from it. Other builds ignore it.
+void n64_set_recomp_dir(const char* path);
 int n64_boot(const char* rom_path);
 int n64_is_running(void);
 void n64_set_pad(int port, const PortPad* pad);

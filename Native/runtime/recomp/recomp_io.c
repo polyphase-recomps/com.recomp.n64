@@ -417,20 +417,26 @@ static void timers_fire(void)
 /* ---- RSP / RDP tasks --------------------------------------------------------------------------- */
 void osSpTaskLoad_recomp(uint8_t *rdram, recomp_context *ctx) { RECOMP_STAT(); }
 
+/* where a frame's time goes (gPortVerbose: logged every 60 frames, in port_ticks units) */
+static unsigned long long sTicksGfx, sTicksAudio, sTicksFrame;
+
 void osSpTaskStartGo_recomp(uint8_t *rdram, recomp_context *ctx)
 {
     RECOMP_STAT();
     uint32_t task = RA0(ctx);
+    const unsigned long long t0 = gPortVerbose ? port_ticks() : 0;
 
     /* tasks complete at once; their interrupts arrive as queued messages */
     if (rr_u32(task) == M_AUDTASK)
     {
         port_audio_run_guest_task(task);
+        if (gPortVerbose) sTicksAudio += port_ticks() - t0;
         recomp_os_post_event(OS_EVENT_SP);
     }
     else
     {
         port_gfx_run_guest_task(task);
+        if (gPortVerbose) sTicksGfx += port_ticks() - t0;
         recomp_os_post_event(OS_EVENT_SP);
         recomp_os_post_event(OS_EVENT_DP);
     }
@@ -611,6 +617,13 @@ int n64_boot(const char *rom_path)
         }
     }
 #endif
+#ifdef RECOMP_LIVE
+    /* Recomp (live): the game's code comes from this ROM, recompiled now (recomp_live.cpp) */
+    if (!recomp_live_load())
+    {
+        return 0;
+    }
+#endif
     if (!recomp_mem_init())
     {
         return 0;
@@ -671,7 +684,22 @@ void n64_run_frame(void)
     port_audio_frame_begin();
     ai_registers_update();
     recomp_os_post_vi_retrace();
-    recomp_os_run();
+    {
+        const unsigned long long t0 = gPortVerbose ? port_ticks() : 0;
+
+        recomp_os_run();
+        if (gPortVerbose)
+        {
+            sTicksFrame += port_ticks() - t0;
+            if ((gPortFrameCount % 60) == 0 && sTicksFrame > 0)
+            {
+                port_log("recomp: last 60 frames: graphics tasks %llu%%, audio tasks %llu%%, game code and the rest %llu%%",
+                         sTicksGfx * 100 / sTicksFrame, sTicksAudio * 100 / sTicksFrame,
+                         (sTicksFrame - sTicksGfx - sTicksAudio) * 100 / sTicksFrame);
+                sTicksGfx = sTicksAudio = sTicksFrame = 0;
+            }
+        }
+    }
 }
 
 void n64_shutdown(void)

@@ -4,8 +4,9 @@
 #   .\update_n64recomp.ps1 -Ref <commit>    # a specific commit or tag
 #
 # Clones N64Recomp with its submodules into a temporary folder, copies only what its CMake
-# builds (plus every license), and rewrites N64Recomp/VERSION.txt. Review the diff, rebuild,
-# and update THIRD_PARTY.md if a dependency or license changed.
+# builds (plus every license), re-applies com.recomp.n64's own changes (n64recomp-local.patch,
+# see THIRD_PARTY.md) and rewrites N64Recomp/VERSION.txt. Review the diff, rebuild, and update
+# THIRD_PARTY.md if a dependency or license changed.
 param([string]$Ref = 'main')
 $ErrorActionPreference = 'Stop'
 if (-not $PSScriptRoot) { throw 'run this script from its file (PSScriptRoot is empty)' }
@@ -43,7 +44,17 @@ foreach ($p in $keep) {
     Copy-Item -LiteralPath $from -Destination $to -Recurse
 }
 
-$lines = @("N64Recomp vendored snapshot (trimmed). Update with ThirdParty/update_n64recomp.ps1.",
+# com.recomp.n64's changes (LiveRecomp hooks the live mode needs). Paths in the patch are from
+# the package root.
+$patch = Join-Path $PSScriptRoot 'n64recomp-local.patch'
+if (Test-Path $patch) {
+    git -C (Split-Path $PSScriptRoot) apply --whitespace=nowarn $patch
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "n64recomp-local.patch no longer applies: port its changes to the new upstream by hand, then regenerate it with 'git diff -- ThirdParty/N64Recomp > ThirdParty/n64recomp-local.patch'"
+    }
+}
+
+$lines = @("N64Recomp vendored snapshot (trimmed, plus n64recomp-local.patch). Update with ThirdParty/update_n64recomp.ps1.",
            "fetched: $(Get-Date -Format yyyy-MM-dd)",
            "N64Recomp  https://github.com/N64Recomp/N64Recomp  $(git -C $tmp rev-parse HEAD)")
 foreach ($line in (git -C $tmp submodule status)) {

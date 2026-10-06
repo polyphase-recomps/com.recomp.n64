@@ -8,6 +8,10 @@
  *   Recomp            com.recomp.n64's Native/tools/recomp/build_recomp.ps1 recompiles the
  *                     user's ROM with N64Recomp (the game package's Recomp/ config) and builds
  *                     it on the recomp runtime. Windows only so far.
+ *   Recomp (live)     the same script with -Live: the library holds the recomp runtime and
+ *                     N64Recomp's LiveRecomp, which recompiles the player's ROM when the game
+ *                     boots, from the symbols shipped in <game>/Assets/Recomp/Live. No game
+ *                     code in the build. 64-bit PCs; Windows only so far.
  *
  * Game packages are Packages/<id> folders with Native/CMakeLists.txt using N64Port.cmake
  * (decomp) and/or Recomp/CMakeLists.txt using N64Recomp.cmake (recomp). The setup runs before
@@ -27,7 +31,8 @@ namespace N64Dependencies
 // Build profile options (Target Options).
 constexpr const char* kSetupOption = "n64.setupDependencies"; // "1" (default) runs the setup before packaging
 constexpr const char* kDecompOption = "n64.decompDir";        // decomp checkout; empty = the game package's default
-// "auto" (default: each game as it was last set up, recomp after Set Up Game), "decomp" or "recomp"
+// "auto" (default: each game as it was last set up, recomp after Set Up Game), "decomp", "recomp"
+// or "live" (Recomp (live))
 constexpr const char* kModeOption = "n64.buildMode";
 // recomp: the user's .z64; empty = the project's copy (Assets/Recomp/Rom), else the game's toml default
 constexpr const char* kRomOption = "n64.romPath";

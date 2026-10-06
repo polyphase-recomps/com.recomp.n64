@@ -14,17 +14,18 @@
 #include <stdint.h>
 
 #if defined(PORT_RSP_HOST) && defined(PORT_RSP_RECOMP)
-/* Recomp mode (runtime/recomp): RDRAM as N64Recomp's code keeps it on a little-endian host,
- * native 32-bit words: halfword addresses ^2, byte addresses ^3. RDRAM pointers are word
- * aligned (the window is page aligned), so the XOR works on host pointers. */
-extern uint8_t *gRecompRdram;
+/* Recomp mode (runtime/recomp): RDRAM laid out as recomp_layout.h says. On a little-endian host
+ * as native 32-bit words: halfword addresses ^2, byte addresses ^3 (RDRAM pointers are word
+ * aligned, so the XOR works on host pointers); on a big-endian host the N64's image as it is.
+ * Display lists, vertices, textures and audio data all live in RDRAM. */
+#include "recomp_layout.h"
 
 #define GM_PTR(addr) ((addr) == 0 ? NULL : (void *)(gRecompRdram + ((uint32_t)(addr) & 0x1FFFFFFFu)))
 #define GM_U32(p) (*(const uint32_t *)(const void *)(p))
-#define GM_U16(p) (*(const uint16_t *)(const void *)((uintptr_t)(p) ^ 2))
-#define GM_U8(p) (*(const uint8_t *)(const void *)((uintptr_t)(p) ^ 3))
+#define GM_U16(p) (*(const uint16_t *)(const void *)((uintptr_t)(p) ^ RECOMP_XOR16))
+#define GM_U8(p) (*(const uint8_t *)(const void *)((uintptr_t)(p) ^ RECOMP_XOR8))
 #define GM_BIG_ENDIAN_DATA 1
-#define GM_SWAPPED 1
+#define GM_SWAPPED RECOMP_SWAPPED
 #elif defined(PORT_RSP_HOST)
 #include "n64w.h"
 

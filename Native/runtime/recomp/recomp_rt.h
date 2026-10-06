@@ -3,9 +3,10 @@
  *
  * N64Recomp turns every MIPS function into a C function `void f(uint8_t *rdram, recomp_context
  * *ctx)` that keeps the CPU registers in ctx and reaches memory through recomp.h's MEM_*
- * macros. On a little-endian host those store RDRAM as native 32-bit words (byte addresses ^3,
- * halfwords ^2): this file's accessors follow the same layout, so runtime code and recompiled
- * code see the same memory.
+ * macros. recomp_layout.h decides how RDRAM sits in host memory (on a little-endian host as
+ * native 32-bit words, byte addresses ^3 and halfwords ^2; on a big-endian one as the N64's
+ * image): the macros and this file's accessors follow it, so runtime code and recompiled code
+ * see the same memory.
  *
  * The parts of libultra that touch hardware (threads, message queues, PI / SI / VI / AI, RSP
  * tasks, timers) are not recompiled: N64Recomp calls `<name>_recomp` instead, and those are
@@ -14,7 +15,8 @@
 #ifndef RECOMP_RT_H
 #define RECOMP_RT_H
 
-#include "recomp.h" /* N64Recomp's generated-code contract (MIT, ThirdParty/N64Recomp/include) */
+#include "recomp.h" /* N64Recomp's generated-code contract (include/portable/recomp.h -> ThirdParty/N64Recomp) */
+#include "recomp_layout.h"
 #include "recomp_ultra.h" /* what the runtime implements for the generated code */
 
 #include <stddef.h>
@@ -25,29 +27,22 @@ extern "C" {
 #endif
 
 /* ---- memory ------------------------------------------------------------------------------
- * `rdram` points at KSEG0 0x80000000. The window behind it covers 0x80000000-0xBFFFFFFF:
- * RDRAM, its uncached KSEG1 mirror at +0x20000000, and the RCP / PI register pages (their
- * writes land in scratch memory). */
-#define RECOMP_RDRAM_SIZE (8u * 1024 * 1024)
+ * `rdram` points at KSEG0 0x80000000, laid out as recomp_layout.h says for this host: on 64-bit
+ * hosts a window behind it covers 0x80000000-0xBFFFFFFF (RDRAM, its uncached KSEG1 mirror at
+ * +0x20000000, and the RCP / PI register pages); on 32-bit hosts addresses are masked to RDRAM
+ * or a small register area. Register writes land in scratch memory either way. */
 #define RECOMP_WINDOW_SIZE 0x40000000u
-
-extern uint8_t *gRecompRdram;
 
 int recomp_mem_init(void); /* 0 on failure */
 void recomp_mem_clear(void);
 
-/* KSEG0 / KSEG1 / physical address -> offset in the window */
-static inline uint32_t recomp_offset(uint32_t addr)
-{
-    return (addr >= 0x80000000u) ? addr - 0x80000000u : addr; /* physical RDRAM = KSEG0 offset */
-}
-
-static inline uint32_t rr_u32(uint32_t addr) { return *(uint32_t *)(gRecompRdram + recomp_offset(addr)); }
-static inline uint16_t rr_u16(uint32_t addr) { return *(uint16_t *)(gRecompRdram + (recomp_offset(addr) ^ 2)); }
-static inline uint8_t rr_u8(uint32_t addr) { return *(gRecompRdram + (recomp_offset(addr) ^ 3)); }
-static inline void rw_u32(uint32_t addr, uint32_t v) { *(uint32_t *)(gRecompRdram + recomp_offset(addr)) = v; }
-static inline void rw_u16(uint32_t addr, uint16_t v) { *(uint16_t *)(gRecompRdram + (recomp_offset(addr) ^ 2)) = v; }
-static inline void rw_u8(uint32_t addr, uint8_t v) { *(gRecompRdram + (recomp_offset(addr) ^ 3)) = v; }
+/* Values in RDRAM (and the register pages) by KSEG0 / KSEG1 / physical address */
+static inline uint32_t rr_u32(uint32_t addr) { return *(uint32_t *)recomp_ptr(gRecompRdram, addr); }
+static inline uint16_t rr_u16(uint32_t addr) { return *(uint16_t *)recomp_ptr(gRecompRdram, addr ^ RECOMP_XOR16); }
+static inline uint8_t rr_u8(uint32_t addr) { return *recomp_ptr(gRecompRdram, addr ^ RECOMP_XOR8); }
+static inline void rw_u32(uint32_t addr, uint32_t v) { *(uint32_t *)recomp_ptr(gRecompRdram, addr) = v; }
+static inline void rw_u16(uint32_t addr, uint16_t v) { *(uint16_t *)recomp_ptr(gRecompRdram, addr ^ RECOMP_XOR16) = v; }
+static inline void rw_u8(uint32_t addr, uint8_t v) { *recomp_ptr(gRecompRdram, addr ^ RECOMP_XOR8) = v; }
 
 /* Big-endian bytes (ROM, save data) to / from RDRAM, any alignment. */
 void recomp_mem_write_be(uint32_t addr, const uint8_t *src, uint32_t size);
@@ -74,6 +69,8 @@ typedef struct RecompSection RecompSection;
 const void *recomp_section_table(size_t *count); /* SectionTableEntry[] */
 
 void recomp_sections_init(void);
+/* Recomp (live) mode: recompiles the loaded ROM (recomp_live.cpp); 0 on failure */
+int recomp_live_load(void);
 /* A PI DMA copied ROM [rom, rom + size) to RAM at vram: code sections in it become the live ones. */
 void recomp_sections_on_dma(uint32_t rom, uint32_t vram, uint32_t size);
 

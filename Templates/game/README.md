@@ -32,6 +32,14 @@ uses. Otherwise, fix what it needs in the toml:
 Busy-wait loops on another thread are handled by the runtime and logged
 (`recomp: thread N spins in the loop at 0x...`).
 
+## Releasing it
+
+Set **Build mode** to **Recomp (live)** in Packaging > Target Options > N64 Recomp, and move
+any ROM out of `Assets/Recomp/Rom`. The build then contains no game code or data: the game
+recompiles the player's own ROM when it starts, from the symbols in `Assets/Recomp/Live`
+(copied from `Recomp/` by the build, git-ignored), and asks the player for the ROM the first
+time. Live builds can't use `[[patches.hook]]` (it is C source); `[[patches.instruction]]` works.
+
 ## Limits (for now)
 
 - Windows only, with the F3DEX2 graphics microcode and the standard (n_)aspMain audio.

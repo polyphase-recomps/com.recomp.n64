@@ -86,6 +86,13 @@ namespace N64Recomp {
         // Maps section index in the generated code to original section index. Used by regenerated
         // code to relocate using the corresponding original section's address.
         std::vector<size_t> original_section_indices;
+        // com.recomp.n64: functions the host implements instead (reimplemented / ignored ones, which
+        // get no recompiled body): calls to these function indices go straight to the host function.
+        std::unordered_map<size_t, recomp_func_t*> external_functions;
+        // com.recomp.n64: preemption points on loop back edges. Every backward jump decrements
+        // *loop_budget and calls loop_preempt(rdram, ctx, loop_vram) when it goes below 0.
+        int32_t* loop_budget = nullptr;
+        void (*loop_preempt)(uint8_t* rdram, recomp_context* ctx, uint32_t loop_vram) = nullptr;
     };
     class LiveGenerator final : public Generator {
     public:

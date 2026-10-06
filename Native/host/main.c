@@ -234,11 +234,14 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--wav") == 0 && i + 1 < argc) wav_path = argv[++i];
         /* Keep the cartridge save in this file (loaded at boot, written when the game saves). */
         else if (strcmp(argv[i], "--save") == 0 && i + 1 < argc) n64_set_save_path(argv[++i]);
+        /* Recomp (live) builds: the game's recompiler data (game.json, toml, symbols) */
+        else if (strcmp(argv[i], "--recomp-dir") == 0 && i + 1 < argc) n64_set_recomp_dir(argv[++i]);
         else
         {
             fprintf(stderr, "usage: <game>_host [--rom path] [--frames N] [--dump dir] [--every N] [--watchdog sec]\n"
                             "                  [--press-from F --press-every N [--press-buttons HEX]]\n"
-                            "                  [--input script.txt] [--dump-from F] [--fuzz seed] [--wav out.wav]\n");
+                            "                  [--input script.txt] [--dump-from F] [--fuzz seed] [--wav out.wav]\n"
+                            "                  [--save file] [--recomp-dir dir]\n");
             return 2;
         }
     }

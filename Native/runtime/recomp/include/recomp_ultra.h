@@ -17,82 +17,82 @@
 extern "C" {
 #endif
 
-#define RECOMP_ULTRA(name) void name##_recomp(uint8_t *rdram, recomp_context *ctx)
+/* Every function, as X(name) (also used to build the live mode's name -> function table) */
+#define RECOMP_ULTRA_FUNCS(X) \
+    /* threads, messages, events, interrupts (recomp_os.c) */ \
+    X(osCreateThread) \
+    X(osStartThread) \
+    X(osStopThread) \
+    X(osDestroyThread) \
+    X(osSetThreadPri) \
+    X(osGetThreadPri) \
+    X(osCreateMesgQueue) \
+    X(osSendMesg) \
+    X(osJamMesg) \
+    X(osRecvMesg) \
+    X(osSetEventMesg) \
+    X(osViSetEvent) \
+    X(osSetIntMask) \
+    X(__osDisableInt) \
+    X(__osRestoreInt) \
+    /* boot, PI, SI, VI, time, RSP/RDP, AI, caches (recomp_io.c) */ \
+    X(osInitialize) \
+    X(osCartRomInit) \
+    X(osCreatePiManager) \
+    X(osEPiStartDma) \
+    X(osContInit) \
+    X(osContStartQuery) \
+    X(osContGetQuery) \
+    X(osContStartReadData) \
+    X(osContGetReadData) \
+    X(__osContAddressCrc) \
+    X(osMotorInit) \
+    X(__osMotorAccess) \
+    X(osCreateViManager) \
+    X(osViSetMode) \
+    X(osViSetYScale) \
+    X(osViBlack) \
+    X(osViSwapBuffer) \
+    X(osViGetCurrentFramebuffer) \
+    X(osViGetNextFramebuffer) \
+    X(osGetCount) \
+    X(osGetTime) \
+    X(osSetTime) \
+    X(osSetTimer) \
+    X(osStopTimer) \
+    X(osSpTaskLoad) \
+    X(osSpTaskStartGo) \
+    X(osSpTaskYield) \
+    X(osSpTaskYielded) \
+    X(__osSpSetPc) \
+    X(osDpSetNextBuffer) \
+    X(osAiSetFrequency) \
+    X(osAiSetNextBuffer) \
+    X(osAiGetLength) \
+    X(osAiGetStatus) \
+    X(osInvalDCache) \
+    X(osInvalICache) \
+    X(osWritebackDCache) \
+    X(osWritebackDCacheAll) \
+    X(__osSetWatchLo) \
+    X(osVirtualToPhysical) \
+    /* compiler helpers and FPU control (recomp_rt.c) */ \
+    X(__ll_div) \
+    X(__ull_div) \
+    X(__ll_rem) \
+    X(__ull_rem) \
+    X(__ll_mul) \
+    X(__ll_lshift) \
+    X(__ull_rshift) \
+    X(__ll_to_f) \
+    X(__ull_to_f) \
+    X(__f_to_ll) \
+    X(__ull_to_d) \
+    X(__osSetFpcCsr)
 
-/* threads, messages, events, interrupts (recomp_os.c) */
-RECOMP_ULTRA(osCreateThread);
-RECOMP_ULTRA(osStartThread);
-RECOMP_ULTRA(osStopThread);
-RECOMP_ULTRA(osDestroyThread);
-RECOMP_ULTRA(osSetThreadPri);
-RECOMP_ULTRA(osGetThreadPri);
-RECOMP_ULTRA(osCreateMesgQueue);
-RECOMP_ULTRA(osSendMesg);
-RECOMP_ULTRA(osJamMesg);
-RECOMP_ULTRA(osRecvMesg);
-RECOMP_ULTRA(osSetEventMesg);
-RECOMP_ULTRA(osViSetEvent);
-RECOMP_ULTRA(osSetIntMask);
-RECOMP_ULTRA(__osDisableInt);
-RECOMP_ULTRA(__osRestoreInt);
-
-/* boot, PI, SI, VI, time, RSP/RDP, AI, caches (recomp_io.c) */
-RECOMP_ULTRA(osInitialize);
-RECOMP_ULTRA(osCartRomInit);
-RECOMP_ULTRA(osCreatePiManager);
-RECOMP_ULTRA(osEPiStartDma);
-RECOMP_ULTRA(osContInit);
-RECOMP_ULTRA(osContStartQuery);
-RECOMP_ULTRA(osContGetQuery);
-RECOMP_ULTRA(osContStartReadData);
-RECOMP_ULTRA(osContGetReadData);
-RECOMP_ULTRA(__osContAddressCrc);
-RECOMP_ULTRA(osMotorInit);
-RECOMP_ULTRA(__osMotorAccess);
-RECOMP_ULTRA(osCreateViManager);
-RECOMP_ULTRA(osViSetMode);
-RECOMP_ULTRA(osViSetYScale);
-RECOMP_ULTRA(osViBlack);
-RECOMP_ULTRA(osViSwapBuffer);
-RECOMP_ULTRA(osViGetCurrentFramebuffer);
-RECOMP_ULTRA(osViGetNextFramebuffer);
-RECOMP_ULTRA(osGetCount);
-RECOMP_ULTRA(osGetTime);
-RECOMP_ULTRA(osSetTime);
-RECOMP_ULTRA(osSetTimer);
-RECOMP_ULTRA(osStopTimer);
-RECOMP_ULTRA(osSpTaskLoad);
-RECOMP_ULTRA(osSpTaskStartGo);
-RECOMP_ULTRA(osSpTaskYield);
-RECOMP_ULTRA(osSpTaskYielded);
-RECOMP_ULTRA(__osSpSetPc);
-RECOMP_ULTRA(osDpSetNextBuffer);
-RECOMP_ULTRA(osAiSetFrequency);
-RECOMP_ULTRA(osAiSetNextBuffer);
-RECOMP_ULTRA(osAiGetLength);
-RECOMP_ULTRA(osAiGetStatus);
-RECOMP_ULTRA(osInvalDCache);
-RECOMP_ULTRA(osInvalICache);
-RECOMP_ULTRA(osWritebackDCache);
-RECOMP_ULTRA(osWritebackDCacheAll);
-RECOMP_ULTRA(__osSetWatchLo);
-RECOMP_ULTRA(osVirtualToPhysical);
-
-/* compiler helpers and FPU control (recomp_rt.c) */
-RECOMP_ULTRA(__ll_div);
-RECOMP_ULTRA(__ull_div);
-RECOMP_ULTRA(__ll_rem);
-RECOMP_ULTRA(__ull_rem);
-RECOMP_ULTRA(__ll_mul);
-RECOMP_ULTRA(__ll_lshift);
-RECOMP_ULTRA(__ull_rshift);
-RECOMP_ULTRA(__ll_to_f);
-RECOMP_ULTRA(__ull_to_f);
-RECOMP_ULTRA(__f_to_ll);
-RECOMP_ULTRA(__ull_to_d);
-RECOMP_ULTRA(__osSetFpcCsr);
-
-#undef RECOMP_ULTRA
+#define RECOMP_ULTRA_DECLARE(name) void name##_recomp(uint8_t *rdram, recomp_context *ctx);
+RECOMP_ULTRA_FUNCS(RECOMP_ULTRA_DECLARE)
+#undef RECOMP_ULTRA_DECLARE
 
 #ifdef __cplusplus
 }

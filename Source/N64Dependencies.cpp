@@ -13,6 +13,8 @@
  *
  *   Build mode Recomp (the game's Recomp/ config, com.recomp.n64's script):
  *   Windows      Windows    Packages/com.recomp.n64/Native/tools/recomp/build_recomp.ps1
+ *   Build mode Recomp (live): the same script with -Live (no game code in the library; the
+ *   game recompiles the player's ROM when it boots, from data shipped in <game>/Assets/Recomp/Live)
  *   (other targets need the recomp runtime's big-endian layout or a Linux script: not yet)
  */
 
@@ -71,6 +73,7 @@ struct GameStatus
     std::string id;
     bool windowsLib, linuxLib, wiiLib, gameCubeLib, n3dsLib, assetPack;
     bool windowsRecomp; // the Windows library was built in recomp mode (Lib/<lib>.mode)
+    bool windowsLive;   // ... in Recomp (live) mode
     bool hasDecomp, hasRecomp;
 };
 
@@ -78,6 +81,7 @@ std::mutex sLock;
 std::vector<std::string> sPending; // background setup output, written by Tick
 std::thread sThread;
 std::atomic<bool> sRunning{false};
+std::vector<std::string> sPendingRawAssets; // files to register for packaging, by Tick (under sLock)
 std::atomic<bool> sFinished{false}; // a background setup ended; Tick refreshes the status
 
 std::vector<GameStatus> sStatus; // for the Target Options panel, refreshed on demand
@@ -347,8 +351,9 @@ std::vector<GamePackage> FindGamePackages()
     return games;
 }
 
-// Lib/<lib>.mode, written by build_recomp.ps1 next to the library it published
-bool WindowsLibIsRecomp(const GamePackage& game)
+// Lib/<lib>.mode, written by build_recomp.ps1 next to the library it published: "recomp", or
+// "recomp-live"
+bool WindowsLibModeHas(const GamePackage& game, const char* word)
 {
     const std::string lib = game.nativeDir + "../Lib/";
 #if PLATFORM_WINDOWS
@@ -362,7 +367,7 @@ bool WindowsLibIsRecomp(const GamePackage& game)
     }
     do
     {
-        recomp = recomp || FileContains(lib + fd.cFileName, "recomp");
+        recomp = recomp || FileContains(lib + fd.cFileName, word);
     } while (FindNextFileA(h, &fd));
     FindClose(h);
     return recomp;
@@ -374,12 +379,22 @@ bool WindowsLibIsRecomp(const GamePackage& game)
     {
         for (size_t i = 0; i < found.gl_pathc; ++i)
         {
-            recomp = recomp || FileContains(found.gl_pathv[i], "recomp");
+            recomp = recomp || FileContains(found.gl_pathv[i], word);
         }
     }
     globfree(&found);
     return recomp;
 #endif
+}
+
+bool WindowsLibIsRecomp(const GamePackage& game)
+{
+    return WindowsLibModeHas(game, "recomp");
+}
+
+bool WindowsLibIsLive(const GamePackage& game)
+{
+    return WindowsLibModeHas(game, "live");
 }
 
 // A decomp build republished the library: the recomp marker no longer applies.
@@ -623,7 +638,7 @@ std::vector<GameStatus> GetStatus()
         status.push_back({game.id, AnyFile(package + "Lib/*.lib"), AnyFile(package + "Lib/Linux/*.a"),
                           AnyFile(package + "Lib/Wii/*.a"), AnyFile(package + "Lib/GameCube/*.a"),
                           AnyFile(package + "Lib/3DS/*.a"), AnyFile(package + "Assets/*.n64pak"),
-                          WindowsLibIsRecomp(game), game.hasDecomp, game.hasRecomp});
+                          WindowsLibIsRecomp(game), WindowsLibIsLive(game), game.hasDecomp, game.hasRecomp});
     }
     return status;
 }
@@ -738,15 +753,41 @@ bool SetupDecomp(const GamePackage& game, int32_t platform, const std::string& d
     return ok;
 }
 
-// Recomp mode: the game recompiled from the user's ROM (com.recomp.n64's build_recomp script).
+// The files a live build ships (<game>/Assets/Recomp/Live), registered for packaging by Tick
+void QueueLiveData(const GamePackage& game)
+{
+    const std::string dir = game.nativeDir + "../Assets/Recomp/Live/";
+    std::vector<std::string> files;
+#if PLATFORM_WINDOWS
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA((dir + "*").c_str(), &fd);
+    if (h != INVALID_HANDLE_VALUE)
+    {
+        do
+        {
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+            {
+                files.push_back(dir + fd.cFileName);
+            }
+        } while (FindNextFileA(h, &fd));
+        FindClose(h);
+    }
+#endif
+    std::lock_guard<std::mutex> guard(sLock);
+    sPendingRawAssets.insert(sPendingRawAssets.end(), files.begin(), files.end());
+}
+
+// Recomp mode: the game recompiled from the user's ROM (com.recomp.n64's build_recomp script);
+// live: the library recompiles it when the game boots.
 bool SetupRecomp(const GamePackage& game, int32_t platform, const std::string& decomp, const std::string& rom,
-                 bool background)
+                 bool live, bool background)
 {
     const char* name = PlatformName(platform);
+    const char* what = live ? "Recomp (live)" : "Recomp";
 
     if ((Platform)platform != Platform::Windows)
     {
-        Emit(std::string("[n64] ") + game.id + ": Build mode Recomp builds for Windows only so far (" +
+        Emit(std::string("[n64] ") + game.id + ": Build mode " + what + " builds for Windows only so far (" +
                  (name ? name : "this platform") + " needs the recomp runtime's big-endian memory layout or a "
                  "Linux script); package Windows, or use Build mode Decomp. SETUP FAILED",
              background);
@@ -762,28 +803,58 @@ bool SetupRecomp(const GamePackage& game, int32_t platform, const std::string& d
     }
     std::string command = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"" + script + "\" -Package \"" +
                           game.nativeDir + "..\"";
-    if (!rom.empty())
+#if defined(_DEBUG)
+    // this editor is a Debug build: its addons use the debug C runtime, and so must the library
+    command += " -DebugCrt";
+#endif
+    if (live)
+    {
+        command += " -Live"; // no ROM needed: the game recompiles the player's when it boots
+    }
+    else if (!rom.empty())
     {
         command += " -Rom \"" + rom + "\"";
     }
-    if (!decomp.empty())
+    if (!decomp.empty() && !live)
     {
         command += " -Decomp \"" + decomp + "\"";
     }
-    Emit("[n64] " + game.id + ": recompiling from the ROM (build_recomp.ps1)", background);
+    Emit("[n64] " + game.id + (live ? ": building the live recompiler runtime (build_recomp.ps1 -Live)"
+                                    : ": recompiling from the ROM (build_recomp.ps1)"),
+         background);
     const bool ok = RunCommand(command, game.nativeDir, background);
-    Emit("[n64] " + game.id + (ok ? ": ready for Windows (recomp)" : ": SETUP FAILED for Windows (recomp)"), background);
+    if (ok && live)
+    {
+        QueueLiveData(game);
+        if (AnyFile(ProjectDir() + "Assets/Recomp/Rom/*.*"))
+        {
+            Emit("[n64] " + game.id + ": note: the project keeps a ROM in Assets/Recomp/Rom, and builds ship it. A "
+                 "release without game data should not: move it out of the project (packaged games ask the "
+                 "player for their ROM).",
+                 background);
+        }
+    }
+    Emit("[n64] " + game.id + (ok ? ": ready for Windows (" : ": SETUP FAILED for Windows (") + what + ")", background);
     return ok;
 #else
-    Emit("[n64] " + game.id + ": Build mode Recomp builds from the editor on Windows only so far. SETUP FAILED",
+    (void)live;
+    Emit("[n64] " + game.id + ": Build mode " + what + " builds from the editor on Windows only so far. SETUP FAILED",
          background);
     return false;
 #endif
 }
 
-bool SetupGame(const GamePackage& game, int32_t platform, const std::string& decomp, bool recomp,
+enum class Pipeline
+{
+    Decomp,
+    Recomp,     // N64Recomp's C, compiled into the library
+    RecompLive  // LiveRecomp in the library, recompiling the player's ROM at boot
+};
+
+bool SetupGame(const GamePackage& game, int32_t platform, const std::string& decomp, Pipeline pipeline,
                const std::string& rom, bool background)
 {
+    bool recomp = pipeline != Pipeline::Decomp;
     if (recomp && !game.hasRecomp)
     {
         Emit("[n64] " + game.id + ": no Recomp/ config in the package; building it from the decomp", background);
@@ -791,7 +862,7 @@ bool SetupGame(const GamePackage& game, int32_t platform, const std::string& dec
     }
     if (recomp)
     {
-        return SetupRecomp(game, platform, decomp, rom, background);
+        return SetupRecomp(game, platform, decomp, rom, pipeline == Pipeline::RecompLive, background);
     }
     if (!game.hasDecomp)
     {
@@ -811,22 +882,32 @@ enum class BuildMode
 {
     Auto,   // each game as it was last set up: recomp if its Windows library is (or it has no decomp)
     Decomp,
-    Recomp
+    Recomp,
+    RecompLive
 };
 
 BuildMode ParseMode(const char* mode)
 {
     const std::string value = mode ? mode : "";
-    return value == "recomp" ? BuildMode::Recomp : value == "decomp" ? BuildMode::Decomp : BuildMode::Auto;
+    return value == "recomp"   ? BuildMode::Recomp
+           : value == "live"   ? BuildMode::RecompLive
+           : value == "decomp" ? BuildMode::Decomp
+                               : BuildMode::Auto;
 }
 
-bool UseRecomp(const GamePackage& game, BuildMode mode)
+Pipeline ChoosePipeline(const GamePackage& game, BuildMode mode)
 {
     switch (mode)
     {
-    case BuildMode::Recomp: return true;
-    case BuildMode::Decomp: return false;
-    default: return !game.hasDecomp || (game.hasRecomp && WindowsLibIsRecomp(game));
+    case BuildMode::Recomp: return Pipeline::Recomp;
+    case BuildMode::RecompLive: return Pipeline::RecompLive;
+    case BuildMode::Decomp: return Pipeline::Decomp;
+    default:
+        if (game.hasRecomp && WindowsLibIsLive(game))
+        {
+            return Pipeline::RecompLive;
+        }
+        return (!game.hasDecomp || (game.hasRecomp && WindowsLibIsRecomp(game))) ? Pipeline::Recomp : Pipeline::Decomp;
     }
 }
 
@@ -848,7 +929,7 @@ bool SetupGames(int32_t platform, const SetupRequest& request, bool background)
 
     for (const GamePackage& game : FindGamePackages())
     {
-        ok = SetupGame(game, platform, request.decomp, UseRecomp(game, request.mode), request.rom, background) && ok;
+        ok = SetupGame(game, platform, request.decomp, ChoosePipeline(game, request.mode), request.rom, background) && ok;
     }
     return ok;
 }
@@ -865,7 +946,6 @@ const char* kProjectRomDir = "Assets/Recomp/Rom/";
 EditorUIHooks* sHooks = nullptr;
 uint64_t sHookId = 0;
 std::string sSetUpStatus;        // the dialog's progress line (under sLock)
-std::string sPendingRawAsset;    // a ROM copied into the project, registered for packaging by Tick (under sLock)
 
 void SetUpStatus(const std::string& line)
 {
@@ -1057,11 +1137,12 @@ bool SetUpGame(const GamePackage& game, const std::string& romIn, bool copyToPro
         EnsureIgnored(ProjectDir(), "Assets/Recomp/Rom/",
                       "# Your own N64 ROMs (Set Up Game): shipped with your builds, never committed");
         std::lock_guard<std::mutex> guard(sLock);
-        sPendingRawAsset = std::string(GetEngineState()->mProjectDirectory) + kProjectRomDir + info.romFile;
+        sPendingRawAssets.push_back(std::string(GetEngineState()->mProjectDirectory) + kProjectRomDir + info.romFile);
     }
 
     SetUpStatus("recompiling " + info.title + " (the first time takes a minute)");
-    const bool ok = SetupRecomp(game, (int32_t)Platform::Windows, "", target, true);
+    // (a game set up for live releases stays live: its library needs no ROM to build)
+    const bool ok = SetupRecomp(game, (int32_t)Platform::Windows, "", target, WindowsLibIsLive(game), true);
     SetUpStatus(ok ? info.title + " is set up. " + kDoneHint + ", then press Play."
                    : std::string("SETUP FAILED while building (see the log)"));
     return ok;
@@ -1318,19 +1399,22 @@ void N64Dependencies::Tick()
         }
     }
 
-    // A ROM Set Up Game copied into the project: packaged with the project's builds from now
-    // on (the editor otherwise finds raw assets when it scans the project)
-    std::string rawAsset;
+    // A ROM Set Up Game copied into the project, a live build's data: packaged with the
+    // project's builds from now on (the editor otherwise finds raw assets when it scans the project)
+    std::vector<std::string> rawAssets;
     {
         std::lock_guard<std::mutex> guard(sLock);
-        rawAsset.swap(sPendingRawAsset);
+        rawAssets.swap(sPendingRawAssets);
     }
-    if (!rawAsset.empty() && AssetManager::Get() != nullptr)
+    for (const std::string& rawAsset : rawAssets)
     {
-        RawAssetEntry entry;
-        entry.mAbsolutePath = rawAsset;
-        entry.mEngineAsset = false;
-        AssetManager::Get()->AddRawAssetEntry(entry);
+        if (AssetManager::Get() != nullptr)
+        {
+            RawAssetEntry entry;
+            entry.mAbsolutePath = rawAsset;
+            entry.mEngineAsset = false;
+            AssetManager::Get()->AddRawAssetEntry(entry);
+        }
     }
 }
 
@@ -1411,11 +1495,12 @@ void N64Dependencies::DrawTargetOptions(const PolyphaseBuildContext* ctx)
     {
         ctx->GetProfileSetting(kModeOption, modeValue, sizeof(modeValue));
     }
-    const char* modeValues[] = {"auto", "decomp", "recomp"};
+    const char* modeValues[] = {"auto", "decomp", "recomp", "live"};
     const BuildMode parsed = ParseMode(modeValue);
-    int mode = parsed == BuildMode::Decomp ? 1 : parsed == BuildMode::Recomp ? 2 : 0;
-    const char* modes[] = {"Auto (as each game was last set up)", "Decomp", "Recomp (from your ROM)"};
-    if (ImGui::Combo("Build mode", &mode, modes, 3) && ctx->SetProfileSetting != nullptr)
+    int mode = parsed == BuildMode::Decomp ? 1 : parsed == BuildMode::Recomp ? 2 : parsed == BuildMode::RecompLive ? 3 : 0;
+    const char* modes[] = {"Auto (as each game was last set up)", "Decomp", "Recomp (from your ROM)",
+                           "Recomp (live: releases without game code)"};
+    if (ImGui::Combo("Build mode", &mode, modes, 4) && ctx->SetProfileSetting != nullptr)
     {
         ctx->SetProfileSetting(kModeOption, modeValues[mode]);
     }
@@ -1426,9 +1511,12 @@ void N64Dependencies::DrawTargetOptions(const PolyphaseBuildContext* ctx)
                           "Recomp: the game is recompiled from your ROM by N64Recomp (the package's Recomp/\n"
                           "config) and runs on the recomp runtime; it boots from the whole ROM. For games\n"
                           "whose decomp is unfinished. Windows only so far.\n"
-                          "Auto: recomp for a game set up from a ROM (Tools > Recomp > N64 > Set Up Game) or\n"
-                          "without a decomp, decomp otherwise.\n"
-                          "Both publish the same library name, so the game's addon is the same either way.");
+                          "Recomp (live): no game code in the build at all. The library carries N64Recomp's\n"
+                          "live recompiler, and the game recompiles the player's own ROM when it boots (about\n"
+                          "half a second), from the symbols shipped in the package. For PC releases.\n"
+                          "Auto: as the game's library was last built; recomp for a game set up from a ROM\n"
+                          "(Tools > Recomp > N64 > Set Up Game) or without a decomp, decomp otherwise.\n"
+                          "All publish the same library name, so the game's addon is the same either way.");
     }
 
     static char rom[512];
@@ -1497,7 +1585,8 @@ void N64Dependencies::DrawTargetOptions(const PolyphaseBuildContext* ctx)
     {
         ImGui::Text("%s (%s):  Windows %s   Linux %s   Wii %s   GameCube %s   3DS %s   assets %s", game.id.c_str(),
                     game.hasDecomp && game.hasRecomp ? "decomp, recomp" : game.hasRecomp ? "recomp only" : "decomp",
-                    !game.windowsLib ? "-" : game.windowsRecomp ? "built (recomp)" : "built", game.linuxLib ? "built" : "-",
+                    !game.windowsLib ? "-" : game.windowsLive ? "built (recomp, live)" : game.windowsRecomp ? "built (recomp)" : "built",
+                    game.linuxLib ? "built" : "-",
                     game.wiiLib ? "built" : "-", game.gameCubeLib ? "built" : "-", game.n3dsLib ? "built" : "-",
                     game.assetPack ? "extracted" : game.windowsRecomp ? "not needed (recomp)" : "MISSING");
     }

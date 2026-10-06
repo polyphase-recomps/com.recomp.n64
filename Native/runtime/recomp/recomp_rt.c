@@ -19,7 +19,7 @@
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-#else
+#elif RECOMP_WINDOW
 #include <sys/mman.h>
 #include <unistd.h>
 #endif
@@ -84,7 +84,8 @@ void recomp_stats_print(void)
     }
 }
 
-/* ---- memory window ------------------------------------------------------------------------ */
+/* ---- memory ----------------------------------------------------------------------------- */
+#if RECOMP_WINDOW
 /* Offsets in the window: RDRAM, its KSEG1 mirror, and the RCP register pages (0xA4000000-). */
 #define KSEG1_OFFSET 0x20000000u
 #define RCP_OFFSET 0x24000000u
@@ -156,6 +157,45 @@ void recomp_mem_clear(void)
     memset(gRecompRdram + RCP_OFFSET, 0, RCP_SIZE);
 }
 
+#else /* !RECOMP_WINDOW: masked addressing (32-bit hosts) */
+
+/* Everything outside RDRAM (RCP / PI / SI registers, mostly) lands in scratch slots: 1 KB per
+ * 256 KB of physical space, so the register blocks (SP 0x0404, DP 0x0410, MI 0x0430, VI 0x0440,
+ * AI 0x0450, PI 0x0460, RI 0x0470, SI 0x0480) each have their own. */
+#define IO_SLOT_SHIFT 18
+#define IO_SLOTS 64
+#define IO_SLOT_SIZE 0x400u
+
+static uint8_t sIo[IO_SLOTS * IO_SLOT_SIZE] __attribute__((aligned(8)));
+static uint8_t *sRdramBlock;
+
+uint8_t *recomp_io_ptr(uint32_t phys)
+{
+    return sIo + ((phys >> IO_SLOT_SHIFT) & (IO_SLOTS - 1)) * IO_SLOT_SIZE + (phys & (IO_SLOT_SIZE - 1));
+}
+
+int recomp_mem_init(void)
+{
+    if (gRecompRdram != NULL)
+    {
+        return 1;
+    }
+    sRdramBlock = malloc(RECOMP_RDRAM_SIZE + 64);
+    if (sRdramBlock == NULL)
+    {
+        return 0;
+    }
+    gRecompRdram = (uint8_t *)(((uintptr_t)sRdramBlock + 63) & ~(uintptr_t)63);
+    return 1;
+}
+
+void recomp_mem_clear(void)
+{
+    memset(gRecompRdram, 0, RECOMP_RDRAM_SIZE);
+    memset(sIo, 0, sizeof(sIo));
+}
+#endif
+
 void recomp_mem_write_be(uint32_t addr, const uint8_t *src, uint32_t size)
 {
     uint32_t i = 0;
@@ -215,9 +255,14 @@ void recomp_sections_init(void)
     }
     memset(sLoaded, 0, sizeof(sLoaded));
     memset(sCache, 0, sizeof(sCache));
+    /* by the recompiler's section index (the table leaves out sections without code) */
     for (i = 0; i < sSectionsNum; i++)
     {
-        sSectionAddresses[i] = (int32_t)sSections[i].ram_addr;
+        if (sSections[i].index >= MAX_SECTIONS)
+        {
+            recomp_fatal("section index %u, more than %u", (unsigned)sSections[i].index, MAX_SECTIONS);
+        }
+        sSectionAddresses[sSections[i].index] = (int32_t)sSections[i].ram_addr;
     }
 }
 

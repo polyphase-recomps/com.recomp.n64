@@ -25,6 +25,19 @@ Only the sources its CMake uses are kept (no tests, docs, bindings or examples).
 reproduce the notices above; sljit's BSD-2 license requires it. Ship this file plus the listed
 license files as the game's third-party notices.
 
+### Local changes to N64Recomp
+
+`n64recomp-local.patch` (re-applied by `update_n64recomp.ps1`) changes LiveRecomp, for the
+recomp runtime's live mode (`Native/runtime/recomp/recomp_live.cpp`):
+- `LiveGeneratorInputs::external_functions`: calls to the given function indices go to host
+  functions (the runtime's libultra, `<name>_recomp`), as the C output calls them by name.
+- `LiveGeneratorInputs::loop_budget` / `loop_preempt`: every jump back to an earlier label
+  decrements the budget and calls the preempt hook when it runs out. These are the runtime's
+  preemption points, which `tools/recomp/add_loop_checks.py` adds to the C output.
+
+Both are additive: without them set, LiveRecomp behaves as upstream. The patch is MIT like the
+code it changes.
+
 ## Not used
 
 N64ModernRuntime (librecomp / ultramodern) is GPL-3.0 and is **not** part of this package, nor is any of

@@ -23,7 +23,7 @@ int gPortFaultGuard;
 int gPortVerbose; /* bring-up aid: backends log what they are doing while this is set */
 unsigned long long gPortGfxProfile[8];
 
-#if !defined(__3DS__)
+#if !defined(__3DS__) && !defined(GEKKO) /* (those count CPU ticks in their own backends) */
 unsigned long long port_ticks(void)
 {
     return 0;
@@ -107,6 +107,18 @@ void port_set_development(int on)
 int port_development(void)
 {
     return sDevelopment;
+}
+
+static char sRecompDir[1024];
+
+void n64_set_recomp_dir(const char *path)
+{
+    snprintf(sRecompDir, sizeof(sRecompDir), "%s", path != NULL ? path : "");
+}
+
+const char *port_recomp_dir(void)
+{
+    return sRecompDir;
 }
 
 #ifndef PORT_WASM_HOST /* (the wasm guest keeps its arena and overlays in its own memory) */

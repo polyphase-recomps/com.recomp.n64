@@ -25,6 +25,7 @@ Source/                 the editor addon (Setup Dependencies, Build mode, Set Up
                         Source/Game/: the player node, Lua and mod.base code template-made game packages include
 Templates/game/         the game package template (Tools > Recomp > N64 > New Game Package)
 Docs/Modding.md         mods and the script bridge (Lua `N64` table)
+Docs/Launcher.md        a front-end scene: set the ROM, set mods up, start the game (N64.SetRomLocation / StartRecomp)
 ThirdParty/N64Recomp/   vendored N64Recomp (MIT) + its libraries, for recomp-assisted games (see ThirdParty/THIRD_PARTY.md)
 ```
 
@@ -32,12 +33,22 @@ The canonical copy of this package lives at `P:\Projects\Recomp\Platforms\N64`. 
 take it as `Packages/com.recomp.n64`, and a game build can point at it directly with
 `-DN64PORT_ROOT=<path>/Native`.
 
-A game builds in one of two ways (Build mode in Packaging > Target Options > N64 Recomp; Auto
+A game builds in one of these ways (Build mode in Packaging > Target Options > N64 Recomp; Auto
 keeps whichever a game was last set up in):
 
 - **Decomp:** the game's own C from a decompilation, built as described below. Every target.
 - **Recomp:** the game recompiled from the player's ROM by N64Recomp, with patches per game.
-  Needs no decomp, only the game's symbol list. Windows so far.
+  Needs no decomp, only the game's symbol list. N64Recomp's C output is compiled into the
+  library, so the library holds code made from your ROM: for development. Windows so far.
+- **Recomp (live):** for PC releases. The library holds no game code: it carries the recomp
+  runtime and N64Recomp's LiveRecomp, and the game recompiles the player's own ROM when it
+  boots, straight to x86-64 / ARM64 (about half a second for SSB64). It ships only the game's
+  recompiler data (`game.json`, the N64Recomp config and symbols, copied to
+  `Packages/<game>/Assets/Recomp/Live` by `build_recomp.ps1 -Live`). The ROM must be the one
+  `game.json` names (sha1); `.v64` / `.n64` dumps are fine. `[[patches.hook]]` entries (C text)
+  need the Recomp mode. Runs exactly as Recomp does (same frames and audio). 64-bit PCs;
+  Windows so far. A release must not keep a ROM in `Assets/Recomp/Rom` (builds ship it):
+  packaged games ask the player for theirs.
 
 The vendored N64Recomp is not part of any Decomp build.
 

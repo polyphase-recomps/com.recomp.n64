@@ -12,7 +12,10 @@
 #include "Plugins/PolyphaseEngineAPI.h"
 
 #include "Game/N64GamePlayer.h"
+#include "Game/N64Launcher.h"
 #include "Game/N64Lua.h"
+
+#include "ModBaseLauncher.h" // com.recomp.mod.base
 #include "Game/N64Provider.h"
 
 #ifndef N64_GAME_PLUGIN_ENTRY
@@ -33,6 +36,8 @@ int OnLoad(PolyphaseEngineAPI* api)
     N64_GAME_FORCE_LINK_CALL(N64_GAME_PLAYER);
     // com.recomp.mod.base (mod settings, Recomp / Mods Lua, Mods windows) sees the game
     Recomp_RegisterProvider(&N64Provider::Get());
+    // ... and can start it from a launcher (ModBaseLauncher.h)
+    Recomp_RegisterLauncher(N64Launcher::AsRecompLauncher());
 
     if (api && api->LogDebug)
     {
@@ -46,6 +51,7 @@ void OnUnload()
     // The game runs its threads as fibers on the engine's main thread; stop them
     // before the module (and the code they would resume into) goes away.
     N64_GAME_PLAYER::ShutdownRuntime();
+    Recomp_UnregisterLauncher(N64Launcher::AsRecompLauncher());
     Recomp_UnregisterProvider(&N64Provider::Get());
     N64_GAME_PLAYER::SetEngineAPI(nullptr);
 

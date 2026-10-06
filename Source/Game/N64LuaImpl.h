@@ -14,6 +14,36 @@
  *   N64.Variables()              { {name=, type=, count=, help=}, ... }
  *   N64.Requests()               { {name=, help=}, ... }
  *
+ * Launcher (Game/N64Launcher.h): a front-end scene that sets the ROM and mods up, then starts
+ * the game (without one, the player node starts it on its first frame):
+ *   N64.SetRomLocation(path)     checks the ROM and remembers it: ok, message
+ *   N64.GetRomLocation()         the ROM set before (this run or an earlier one), or nil
+ *   N64.ClearRomLocation()       forgets it
+ *   N64.CheckRom(path)           ok, message (what it is, or why it won't do), nothing saved
+ *   N64.BrowseForRom()           a file dialog: the picked path, or nil (Windows, Linux)
+ *   N64.LoadMods()               loads the game's mod settings so `Mods.List/Get/Set` work
+ *                                before it runs; false if it has no Mod Map
+ *   N64.StartRecomp()            starts the game now: ok, message (a Recomp (live) build
+ *                                recompiles the ROM first, about half a second)
+ *   N64.IsStarted()              true once it started
+ *   N64.GetStatus()              "idle" / "running" / "failed", and the last start's message
+ *
+ *     function Launcher:Start()
+ *         N64.LoadMods()
+ *         self.romText:SetText(N64.GetRomLocation() or "No ROM set")
+ *     end
+ *     function Launcher:OnBrowse()
+ *         local path = N64.BrowseForRom()
+ *         if path then
+ *             local ok, message = N64.SetRomLocation(path)
+ *             self.romText:SetText(message)
+ *         end
+ *     end
+ *     function Launcher:OnPlay()
+ *         local ok, message = N64.StartRecomp()
+ *         if ok then self:GetWorld():LoadScene("SC_Game") else self.romText:SetText(message) end
+ *     end
+ *
  * Requests run on the game thread at its next frame, so Result is nil for at least one
  * frame: poll it from a Tick. Events are how the game drives Polyphase, e.g.
  *
@@ -40,6 +70,7 @@
 #if LUA_ENABLED
 
 #include "Game/N64GameApi.h"
+#include "Game/N64Launcher.h"
 #include "Plugins/PolyphaseEngineAPI.h"
 
 #include <string>
@@ -223,6 +254,84 @@ int Variables(lua_State* L)
     return 1;
 }
 
+// ---- launcher (Game/N64Launcher.h) ----
+int PushResult(lua_State* L, bool ok, const std::string& message)
+{
+    sApi->Lua_pushboolean(L, ok);
+    sApi->Lua_pushstring(L, message.c_str());
+    return 2;
+}
+
+void PushPathOrNil(lua_State* L, const std::string& path)
+{
+    if (path.empty())
+    {
+        sApi->Lua_pushnil(L);
+    }
+    else
+    {
+        sApi->Lua_pushstring(L, path.c_str());
+    }
+}
+
+int SetRomLocation(lua_State* L)
+{
+    std::string message;
+    const bool ok = N64Launcher::SetRomLocation(sApi->LuaL_checkstring(L, 1), message);
+    return PushResult(L, ok, message);
+}
+
+int GetRomLocation(lua_State* L)
+{
+    PushPathOrNil(L, N64Launcher::GetRomLocation());
+    return 1;
+}
+
+int ClearRomLocation(lua_State*)
+{
+    N64Launcher::ClearRomLocation();
+    return 0;
+}
+
+int CheckRom(lua_State* L)
+{
+    std::string message;
+    const bool ok = N64Launcher::CheckRom(sApi->LuaL_checkstring(L, 1), message);
+    return PushResult(L, ok, message);
+}
+
+int BrowseForRom(lua_State* L)
+{
+    PushPathOrNil(L, N64Launcher::BrowseForRom());
+    return 1;
+}
+
+int LoadMods(lua_State* L)
+{
+    sApi->Lua_pushboolean(L, N64Launcher::LoadMods());
+    return 1;
+}
+
+int StartRecomp(lua_State* L)
+{
+    std::string message;
+    const bool ok = N64Launcher::StartRecomp(message);
+    return PushResult(L, ok, message);
+}
+
+int IsStarted(lua_State* L)
+{
+    sApi->Lua_pushboolean(L, N64Launcher::IsStarted());
+    return 1;
+}
+
+int GetStatus(lua_State* L)
+{
+    sApi->Lua_pushstring(L, N64Launcher::GetStatus());
+    sApi->Lua_pushstring(L, N64Launcher::GetMessage().c_str());
+    return 2;
+}
+
 int Requests(lua_State* L)
 {
     const int count = n64_bridge_request_count();
@@ -255,9 +364,15 @@ void N64Lua::Register(lua_State* L, PolyphaseEngineAPI* api)
     static const LuaReg kFuncs[] = {
         {"IsRunning", IsRunning}, {"Get", Get},             {"Set", Set},
         {"Request", Request},     {"Result", Result},       {"PollEvent", PollEvent},
-        {"Variables", Variables}, {"Requests", Requests},   {nullptr, nullptr},
+        {"Variables", Variables}, {"Requests", Requests},
+        // launcher
+        {"SetRomLocation", SetRomLocation}, {"GetRomLocation", GetRomLocation},
+        {"ClearRomLocation", ClearRomLocation}, {"CheckRom", CheckRom},
+        {"BrowseForRom", BrowseForRom},     {"LoadMods", LoadMods},
+        {"StartRecomp", StartRecomp},       {"IsStarted", IsStarted},
+        {"GetStatus", GetStatus},           {nullptr, nullptr},
     };
-    sApi->Lua_createtable(L, 0, 8);
+    sApi->Lua_createtable(L, 0, 17);
     sApi->LuaL_setfuncs(L, kFuncs, 0);
     sApi->Lua_setglobal(L, "N64");
 }

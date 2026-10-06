@@ -3,18 +3,14 @@
  * @brief Implementation of the N64 game player node (Game/N64GamePlayer.h). Included by exactly
  *        one .cpp of a game package, after its <Name>Player.h.
  *
- * Game data, tried in order:
- *   1. the asset pack the decomp build cuts from the ROM (Packages/<package>/Assets/<id>.n64pak);
- *      a recompiled game refuses it (in the editor it then boots the ROM it was built from)
- *   2. the ROM Set Up Game keeps in the project (Assets/Recomp/Rom/<rom file>), shipped with
- *      the project's builds
- *   3. the ROM the player chose before (Saves/<id>.rom.txt)
- *   4. the node's ROM Path property
- *   5. a packaged game (Windows, Linux) asks the player for their ROM, and remembers it
+ * The game boots through Game/N64Launcher.h (the game data it tries, in order, are listed in
+ * Game/N64LauncherImpl.h): started by a launcher scene (N64.StartRecomp()), or by this node on
+ * its first frame when nothing started it before.
  */
 #pragma once
 
 #include "Game/N64GameApi.h"
+#include "Game/N64LauncherImpl.h"
 #include "Game/N64Provider.h"
 
 // com.recomp.mod.base: mod settings, resolution scaler, shared menus
@@ -35,25 +31,9 @@
 #include <string>
 #include <vector>
 
-#if !EDITOR && PLATFORM_WINDOWS
-// MessageBoxA, for asking a packaged game's player for their ROM
-#define WIN32_LEAN_AND_MEAN
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#endif
-
 #if PLATFORM_3DS
 #include "Renderer.h"
 #include "Graphics/C3D/C3dTypes.h"
-#endif
-
-// Plain mkdir: the packaged Standalone project builds as C++14, so no <filesystem>.
-#if PLATFORM_WINDOWS
-#include <direct.h>
-#elif PLATFORM_LINUX || PLATFORM_DOLPHIN || PLATFORM_3DS
-#include <sys/stat.h>
 #endif
 
 // (the extra level makes the class name macro expand before FORCE_LINK pastes it)
@@ -69,16 +49,6 @@ namespace N64GamePlayerDetail
 {
 const float kFrameTime = 1.0f / 60.0f;
 const int kMaxFramesPerTick = 3;
-// Game data extracted from the user's own ROM by the decomp build: asset files only, no game code.
-const char* const kAssetPackPath = "Packages/" N64_GAME_PACKAGE "/Assets/" N64_GAME_ID ".n64pak";
-// The user's ROM, kept in the project by Set Up Game: what the recompiled game boots.
-const char* const kProjectRomPath = "Assets/Recomp/Rom/" N64_GAME_ROM_FILE;
-
-void LogSink(const char* line)
-{
-    LogDebug("%s", line);
-}
-
 #if PLATFORM_DOLPHIN
 // com.recomp.n64's GPU path (port_host.h). Weak: a game library built before it existed
 // still links (the picture then fills the screen as before).
@@ -120,56 +90,6 @@ void RenderGame3ds(void*)
 }
 #endif
 
-// The ROM a packaged game's player chose (AskForRom), kept next to the save.
-std::string ReadChosenRom(const std::string& file)
-{
-    std::ifstream in(file.c_str());
-    std::string path;
-
-    std::getline(in, path);
-    while (!path.empty() && (path.back() == '\r' || path.back() == ' '))
-    {
-        path.pop_back();
-    }
-    return path;
-}
-
-#if !EDITOR && (PLATFORM_WINDOWS || PLATFORM_LINUX)
-// Asks the player for their ROM (.z64, .v64 or .n64) until one boots or they cancel, and
-// remembers it. n64_boot refuses files that are not the game (a recompiled game: any ROM but
-// the one it was recompiled from).
-bool AskForRom(const std::string& chosenFile)
-{
-    const char* text = N64_GAME_TITLE " needs your own copy of the game: choose your ROM of " N64_GAME_TITLE
-                       " (.z64, .v64 or .n64). It is remembered for next time.";
-    for (int attempt = 0; attempt < 5; ++attempt)
-    {
-#if PLATFORM_WINDOWS
-        if (MessageBoxA(nullptr, attempt == 0 ? text : "That file is not a ROM of " N64_GAME_TITLE ". Choose another?",
-                        N64_GAME_TITLE, MB_OKCANCEL | MB_ICONINFORMATION) != IDOK)
-        {
-            return false;
-        }
-#else
-        LogWarning("%s", text);
-#endif
-        const std::vector<std::string> picked = SYS_OpenFileDialog();
-        if (picked.empty())
-        {
-            return false;
-        }
-        if (n64_boot(picked[0].c_str()))
-        {
-            std::ofstream out(chosenFile.c_str(), std::ios::trunc);
-            out << picked[0] << "\n";
-            return true;
-        }
-        LogError("%s: '%s' is not a usable ROM of the game", N64_GAME_TITLE, picked[0].c_str());
-    }
-    return false;
-}
-#endif
-
 #if EDITOR && N64_HAS_NATIVE_LIB
 // port_set_development is new in com.recomp.n64: a game library built before it still links
 // (weakly: the stand-in does nothing) until Setup Dependencies rebuilds it.
@@ -178,6 +98,17 @@ extern "C" void n64_game_set_development_stand_in(int) {}
 #pragma comment(linker, "/alternatename:port_set_development=n64_game_set_development_stand_in")
 #else
 extern "C" void port_set_development(int) __attribute__((weak, alias("n64_game_set_development_stand_in")));
+#endif
+#endif
+
+#if N64_HAS_NATIVE_LIB
+// n64_set_recomp_dir is new in com.recomp.n64 too: a library built before it (any decomp build
+// so far) links against this stand-in, which does nothing.
+extern "C" void n64_game_set_recomp_dir_stand_in(const char*) {}
+#if defined(_MSC_VER)
+#pragma comment(linker, "/alternatename:n64_set_recomp_dir=n64_game_set_recomp_dir_stand_in")
+#else
+extern "C" void n64_set_recomp_dir(const char*) __attribute__((weak, alias("n64_game_set_recomp_dir_stand_in")));
 #endif
 #endif
 
@@ -265,7 +196,7 @@ void N64GameMapGamepad(int port, PortPad& pad)
 N64_GAME_PLAYER::N64_GAME_PLAYER()
 {
     // Relative paths are resolved against the project directory.
-    mRomPath = N64GamePlayerDetail::kAssetPackPath;
+    mRomPath = N64LauncherDetail::kAssetPackPath;
 }
 
 N64_GAME_PLAYER::~N64_GAME_PLAYER()
@@ -291,11 +222,12 @@ void N64_GAME_PLAYER::ShutdownRuntime()
         sAPI->Audio_CloseStream(sAudioStream);
     }
     sAudioStream = 0;
-    if (sBootAttempted)
+    if (sBootAttempted || N64Launcher::IsStarted())
     {
         n64_shutdown();
         sBootAttempted = false;
     }
+    N64Launcher::Reset();
     port_set_fault_containment(0);
     port_set_log_sink(nullptr);
 }
@@ -353,53 +285,8 @@ void N64_GAME_PLAYER::EnsureBooted()
     }
     sBootAttempted = true;
 
-    const std::string projectDir = GetEngineState()->mProjectDirectory;
-    std::string path = mRomPath;
-    const bool isAbsolute = path.size() > 1 && (path[1] == ':' || path[0] == '/' || path[0] == '\\');
-    if (!isAbsolute)
-    {
-        path = projectDir + path;
-    }
-
-    port_set_log_sink(LogSink);
-    // A crash in game code stops the game, not the editor.
-    port_set_fault_containment(1);
-
-    // Unlocks, records and options persist in the project's Saves folder.
-    const std::string saveDir = projectDir + "Saves";
-#if PLATFORM_WINDOWS
-    _mkdir(saveDir.c_str()); // fails harmlessly if it already exists
-#elif PLATFORM_LINUX || PLATFORM_DOLPHIN || PLATFORM_3DS
-    mkdir(saveDir.c_str(), 0755);
-#endif
-    n64_set_save_path((saveDir + "/" N64_GAME_ID ".sra").c_str());
-
-#if EDITOR
-    // The developer's machine: a recompiled game may fall back to the ROM it was built from.
-    port_set_development(1);
-#endif
-
-    const std::string pack = projectDir + kAssetPackPath;
-    const std::string projectRom = projectDir + kProjectRomPath;
-    const std::string chosenFile = saveDir + "/" N64_GAME_ID ".rom.txt";
-    const std::string chosenRom = ReadChosenRom(chosenFile);
-    bool booted = n64_boot(pack.c_str()) ||
-                  (SYS_DoesFileExist(projectRom.c_str(), false) && n64_boot(projectRom.c_str())) ||
-                  (!chosenRom.empty() && SYS_DoesFileExist(chosenRom.c_str(), false) && n64_boot(chosenRom.c_str())) ||
-                  (path != pack && path != projectRom && n64_boot(path.c_str()));
-#if !EDITOR && (PLATFORM_WINDOWS || PLATFORM_LINUX)
-    // A packaged game without game data of its own: the player points it at their ROM once.
-    if (!booted)
-    {
-        booted = AskForRom(chosenFile);
-    }
-#endif
-    if (!booted)
-    {
-        LogError("%s: no game data. Expected the ROM at '%s' (Tools > Recomp > N64 > Set Up Game), or the decomp "
-                 "build's asset pack at '%s'; also tried '%s'",
-                 N64_GAME_TITLE, projectRom.c_str(), pack.c_str(), path.c_str());
-    }
+    // a launcher scene may have started the game already (N64.StartRecomp)
+    N64Launcher::BootFromPlayer(mRomPath, true);
 #if PLATFORM_3DS
     if (sRenderPassId == 0 && Renderer::Get() != nullptr)
     {
