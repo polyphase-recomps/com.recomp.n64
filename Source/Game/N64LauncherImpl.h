@@ -424,7 +424,7 @@ const char* N64Launcher::GetStatus()
     }
 }
 
-std::string N64Launcher::GetMessage()
+std::string N64Launcher::GetStatusMessage()
 {
     return N64LauncherDetail::sMessage;
 }
@@ -492,7 +492,7 @@ public:
     bool HasShippedData() override { return N64Launcher::HasShippedData(); }
     bool StartGame(std::string& message) override { return N64Launcher::StartRecomp(message); }
     bool IsStarted() override { return N64Launcher::IsStarted(); }
-    std::string LastMessage() override { return N64Launcher::GetMessage(); }
+    std::string LastMessage() override { return N64Launcher::GetStatusMessage(); }
 };
 } // namespace N64LauncherDetail
 

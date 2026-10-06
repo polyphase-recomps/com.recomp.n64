@@ -22,8 +22,18 @@
 #error "N64Game.h must define N64_GAME_PLUGIN_ENTRY (PolyphasePlugin_GetDesc_com_recomp_<id>)"
 #endif
 
-// (the extra level makes the class name macro expand before FORCE_LINK pastes it)
-#define N64_GAME_FORCE_LINK_CALL(name) FORCE_LINK_CALL(name)
+// The player's FORCE_LINK_DEF variable (Game/N64GamePlayerImpl.h) is global. FORCE_LINK_CALL
+// declares it inside the function using it, which in the namespace below would name a member of
+// that namespace instead (an unresolved external), so it is declared and set out here.
+// (the extra level makes the class name macro expand before ## pastes it)
+#define N64_GAME_FORCE_LINK_REF_(name)                                                               \
+    extern int gForceLink_##name;                                                                    \
+    inline void N64GameForceLinkPlayer()                                                             \
+    {                                                                                                \
+        gForceLink_##name = 1;                                                                       \
+    }
+#define N64_GAME_FORCE_LINK_REF(name) N64_GAME_FORCE_LINK_REF_(name)
+N64_GAME_FORCE_LINK_REF(N64_GAME_PLAYER)
 
 namespace N64GamePluginDetail
 {
@@ -33,7 +43,7 @@ int OnLoad(PolyphaseEngineAPI* api)
 {
     sEngineAPI = api;
     N64_GAME_PLAYER::SetEngineAPI(api);
-    N64_GAME_FORCE_LINK_CALL(N64_GAME_PLAYER);
+    N64GameForceLinkPlayer();
     // com.recomp.mod.base (mod settings, Recomp / Mods Lua, Mods windows) sees the game
     Recomp_RegisterProvider(&N64Provider::Get());
     // ... and can start it from a launcher (ModBaseLauncher.h)

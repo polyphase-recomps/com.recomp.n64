@@ -328,7 +328,7 @@ int IsStarted(lua_State* L)
 int GetStatus(lua_State* L)
 {
     sApi->Lua_pushstring(L, N64Launcher::GetStatus());
-    sApi->Lua_pushstring(L, N64Launcher::GetMessage().c_str());
+    sApi->Lua_pushstring(L, N64Launcher::GetStatusMessage().c_str());
     return 2;
 }
 

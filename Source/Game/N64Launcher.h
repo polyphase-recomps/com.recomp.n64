@@ -50,9 +50,9 @@ bool LoadMods();
 // Starting again once the game runs does nothing and returns true.
 bool StartRecomp(std::string& message);
 bool IsStarted();
-// "idle" (not started), "running", or "failed"; GetMessage() is the last start's message.
+// "idle" (not started), "running", or "failed"; GetStatusMessage() is the last start's message (not GetMessage: windows.h makes that a macro).
 const char* GetStatus();
-std::string GetMessage();
+std::string GetStatusMessage();
 
 // ---- for the player node ----------------------------------------------------------------------
 // The player's own boot on its first frame (when no launcher started the game): the ROM set
