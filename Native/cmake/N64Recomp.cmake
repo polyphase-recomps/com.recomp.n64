@@ -123,8 +123,10 @@ function(n64port_recomp_game name)
     endif()
     # recomp_hooks.h: runtime functions the game's [[patches.hook]] text may call
     if(generated_c)
+        # -ffp-contract=off: no fused multiply-adds (ARM64 compilers fuse by default), so the game
+        # computes the same floats on every machine (netplay between PCs, Macs and consoles)
         set_source_files_properties(${generated_c} PROPERTIES COMPILE_OPTIONS
-            "$<$<C_COMPILER_ID:GNU,Clang>:-w;-fno-strict-aliasing;-include;recomp_hooks.h>$<$<C_COMPILER_ID:MSVC>:/FIrecomp_hooks.h>")
+            "$<$<C_COMPILER_ID:GNU,Clang>:-w;-fno-strict-aliasing;-ffp-contract=off;-include;recomp_hooks.h>$<$<C_COMPILER_ID:MSVC>:/FIrecomp_hooks.h>")
     endif()
     set_target_properties(${name}_recomp PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON C_STANDARD 11)
     if(WIN32)

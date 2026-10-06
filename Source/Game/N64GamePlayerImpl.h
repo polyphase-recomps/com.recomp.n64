@@ -36,6 +36,18 @@
 #include "Graphics/C3D/C3dTypes.h"
 #endif
 
+// com.recomp.netplay, when the game's package depends on it: networked multiplayer (a session's
+// inputs drive the game on every machine; see its NetplayN64.h). Other games build as before.
+#if defined(__has_include)
+#if __has_include("NetplayN64.h")
+#include "NetplayN64.h"
+#define N64_GAME_NETPLAY 1
+#endif
+#endif
+#ifndef N64_GAME_NETPLAY
+#define N64_GAME_NETPLAY 0
+#endif
+
 // (the extra level makes the class name macro expand before FORCE_LINK pastes it)
 #define N64_GAME_FORCE_LINK_DEF(name) FORCE_LINK_DEF(name)
 N64_GAME_FORCE_LINK_DEF(N64_GAME_PLAYER);
@@ -49,6 +61,10 @@ namespace N64GamePlayerDetail
 {
 const float kFrameTime = 1.0f / 60.0f;
 const int kMaxFramesPerTick = 3;
+#if N64_GAME_NETPLAY
+// this machine's controller (port 1's input), which a netplay session sends to the others
+PortPad sLocalPad = {};
+#endif
 #if PLATFORM_DOLPHIN
 // com.recomp.n64's GPU path (port_host.h). Weak: a game library built before it existed
 // still links (the picture then fills the screen as before).
@@ -361,6 +377,12 @@ void N64_GAME_PLAYER::SendInput()
             pad.stick_x = pad.stick_y = 0;
         }
 
+#if N64_GAME_NETPLAY
+        if (port == 0)
+        {
+            N64GamePlayerDetail::sLocalPad = pad;
+        }
+#endif
         n64_set_pad(port, &pad);
     }
 }
@@ -485,6 +507,42 @@ void N64_GAME_PLAYER::Tick(float deltaTime)
     {
         return;
     }
+
+#if N64_GAME_NETPLAY
+    // com.recomp.netplay: while a session plays, every machine's input drives the game (the
+    // session reboots it with the host's save when it starts, and with ours when it ends)
+    {
+        const std::string saveDir = GetEngineState()->mProjectDirectory + "Saves";
+        NetplayN64::Configure(N64_GAME_ID, N64_GAME_TITLE, "n64", "", saveDir + "/" N64_GAME_ID ".sra");
+        if (NetplaySession::IsPlaying())
+        {
+            SendInput(); // this machine's controller (sLocalPad)
+        }
+        auto reboot = [this](const std::string& save) {
+            n64_shutdown();
+            n64_set_save_path(save.c_str());
+            std::string path = mRomPath;
+            if (!path.empty() && !N64LauncherDetail::IsAbsolute(path))
+            {
+                path = GetEngineState()->mProjectDirectory + path;
+            }
+            if (!N64LauncherDetail::BootShipped() && !N64LauncherDetail::Boot(path))
+            {
+                LogError("netplay: the game did not boot again");
+            }
+        };
+        const int ran = NetplayN64::RunFrames(deltaTime, sLocalPad, reboot, [this] { SubmitAudio(); }, saveDir,
+                                              mFrameAccumulator);
+        if (ran >= 0)
+        {
+            if (ran > 0)
+            {
+                UpdateDisplayTexture();
+            }
+            return;
+        }
+    }
+#endif
 
     // The game logic is locked to 60 Hz; run as many game frames as real time has covered.
     mFrameAccumulator += deltaTime;
