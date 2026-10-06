@@ -264,6 +264,8 @@ int main(int argc, char **argv)
     }
     diagnostics_start();
 
+    /* a developer's tool: development fallbacks apply, unless N64_PACKAGED=1 (boot as a packaged game) */
+    port_set_development(!port_env_int("N64_PACKAGED"));
     if (!n64_boot(rom))
     {
         return 1;

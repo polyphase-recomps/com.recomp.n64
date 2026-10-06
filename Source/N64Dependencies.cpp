@@ -446,8 +446,9 @@ std::string JsonValue(const std::string& text, const char* key)
 struct GameInfo
 {
     std::string title;   // "Super Smash Bros. (US)"
+    std::string config;  // the N64Recomp config in Recomp/: "recomp.us.toml"
     std::string romFile; // the name the ROM gets in the project: "ssb64.us.z64"
-    std::string sha1;    // of the .z64 the package recompiles (lower case hex)
+    std::string sha1;    // of the .z64 the package recompiles (lower case hex); empty: not known yet
     uint64_t romSize = 0;
 };
 
@@ -457,6 +458,7 @@ GameInfo ReadGameInfo(const GamePackage& game)
     GameInfo info;
 
     info.title = JsonValue(text, "title");
+    info.config = JsonValue(text, "config");
     info.romFile = JsonValue(text, "file");
     info.sha1 = JsonValue(text, "sha1");
     info.romSize = strtoull(JsonValue(text, "size").c_str(), nullptr, 10);
@@ -874,9 +876,140 @@ void SetUpStatus(const std::string& line)
     Emit("[n64] " + line, true);
 }
 
+// Replaces the first `from` in a file (false if it is not there or the file cannot be written).
+bool ReplaceInFile(const std::string& path, const std::string& from, const std::string& to)
+{
+    std::string text = ReadText(path);
+    const size_t at = text.find(from);
+
+    if (at == std::string::npos)
+    {
+        return false;
+    }
+    text.replace(at, from.size(), to);
+    std::ofstream out(path.c_str(), std::ios::binary | std::ios::trunc);
+    out << text;
+    return out.good();
+}
+
+// The value of `key = number` in a TOML text (0 if absent).
+uint32_t TomlNumber(const std::string& text, const char* key)
+{
+    size_t at = 0;
+    const size_t keyLen = strlen(key);
+
+    while ((at = text.find(key, at)) != std::string::npos)
+    {
+        const bool lineStart = at == 0 || text[at - 1] == '\n' || text[at - 1] == ' ' || text[at - 1] == '\t';
+        size_t eq = text.find_first_not_of(" \t", at + keyLen);
+        if (lineStart && eq != std::string::npos && text[eq] == '=')
+        {
+            return (uint32_t)strtoul(text.c_str() + eq + 1, nullptr, 0);
+        }
+        at += keyLen;
+    }
+    return 0;
+}
+
+// Where the game starts: the code section the boot code copies from ROM 0x1000, as the symbol
+// file lists it (0 if it does not).
+uint32_t EntryFromSymbols(const std::string& symbolsPath)
+{
+    const std::string text = ReadText(symbolsPath);
+    size_t at = 0;
+
+    while ((at = text.find("[[section]]", at)) != std::string::npos)
+    {
+        const size_t end = text.find("[[section]]", at + 11);
+        const std::string section = text.substr(at, end == std::string::npos ? std::string::npos : end - at);
+        if (TomlNumber(section, "rom") == 0x1000)
+        {
+            return TomlNumber(section, "vram");
+        }
+        at += 11;
+    }
+    return 0;
+}
+
+uint32_t Crc32(const uint8_t* data, size_t size)
+{
+    uint32_t crc = 0xFFFFFFFFu;
+
+    for (size_t i = 0; i < size; ++i)
+    {
+        crc ^= data[i];
+        for (int bit = 0; bit < 8; ++bit)
+        {
+            crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
+        }
+    }
+    return ~crc;
+}
+
+// Where the game starts by the cartridge header (0x08): the boot code of some cartridge types
+// (CIC 6103, 6106, told apart by its checksum) moves it down before jumping there.
+uint32_t EntryFromHeader(const std::vector<uint8_t>& rom)
+{
+    const uint32_t entry = ((uint32_t)rom[8] << 24) | ((uint32_t)rom[9] << 16) | ((uint32_t)rom[10] << 8) | rom[11];
+
+    switch (Crc32(rom.data() + 0x40, 0x1000 - 0x40))
+    {
+    case 0x0B050EE0u: return entry - 0x100000; // CIC 6103
+    case 0xACC8580Au: return entry - 0x200000; // CIC 6106
+    default: return entry;
+    }
+}
+
+// A package new from the template knows its game but not the ROM yet: the first one it is set
+// up with becomes the one it recompiles (game.json's sha1 and size, the config's entry point).
+bool AdoptRom(const GamePackage& game, GameInfo& info, const std::vector<uint8_t>& rom, const std::string& sha1)
+{
+    const std::string recomp = game.nativeDir + "../Recomp/";
+    char size[32];
+
+    snprintf(size, sizeof(size), "%llu", (unsigned long long)rom.size());
+    if (!ReplaceInFile(recomp + "game.json", "\"sha1\": \"\"", "\"sha1\": \"" + sha1 + "\"") ||
+        !ReplaceInFile(recomp + "game.json", "\"size\": 0", std::string("\"size\": ") + size))
+    {
+        SetUpStatus("SETUP FAILED: cannot record the ROM in " + recomp + "game.json");
+        return false;
+    }
+    info.sha1 = sha1;
+    info.romSize = rom.size();
+
+    // The entry point: the symbol file's first code section, else the cartridge header's
+    const std::string config = info.config.empty() ? std::string() : ReadText(recomp + info.config);
+    const size_t symbolsKey = config.find("symbols_file_path");
+    std::string symbols;
+    if (symbolsKey != std::string::npos)
+    {
+        const size_t open = config.find('"', symbolsKey), close = config.find('"', open + 1);
+        if (open != std::string::npos && close != std::string::npos)
+        {
+            symbols = config.substr(open + 1, close - open - 1);
+        }
+    }
+    uint32_t entry = symbols.empty() ? 0 : EntryFromSymbols(recomp + symbols);
+    if (entry == 0)
+    {
+        entry = EntryFromHeader(rom);
+    }
+    char line[64];
+    snprintf(line, sizeof(line), "entrypoint = 0x%08X", entry);
+    if (!info.config.empty() && ReplaceInFile(recomp + info.config, "entrypoint = 0x00000000", line))
+    {
+        SetUpStatus(std::string("recorded the ROM in game.json and the entry point in ") + info.config + ": " + line);
+    }
+    else
+    {
+        SetUpStatus("recorded the ROM in game.json (sha1 " + sha1.substr(0, 12) + "...)");
+    }
+    return true;
+}
+
 bool SetUpGame(const GamePackage& game, const std::string& romIn, bool copyToProject)
 {
-    const GameInfo info = ReadGameInfo(game);
+    GameInfo info = ReadGameInfo(game);
     std::string error;
 
     SetUpStatus("reading " + romIn);
@@ -892,6 +1025,10 @@ bool SetUpGame(const GamePackage& game, const std::string& romIn, bool copyToPro
     {
         SetUpStatus("SETUP FAILED: this is not the ROM " + game.id + " recompiles (" + info.title + "): sha1 " + sha1 +
                     ", expected " + info.sha1 + ". Another region or revision, or a bad dump?");
+        return false;
+    }
+    if (info.sha1.empty() && !AdoptRom(game, info, rom, sha1))
+    {
         return false;
     }
 
@@ -1049,6 +1186,74 @@ bool DrawSetUpGame(void*)
     }
     return !close;
 }
+
+// ---- New Game Package (Tools > Recomp > N64 > New Game Package...) -----------------------
+// com.recomp.n64's template (Templates/game) made into Packages/com.recomp.<id>
+// (Native/tools/recomp/new_game.ps1): a data-only package Set Up Game then recompiles.
+
+const char* kNewGameTitle = "New N64 Game Package";
+
+bool DrawNewGame(void*)
+{
+    static char id[32] = "";
+    static char title[128] = "";
+    static char region[8] = "us";
+    static std::string status;
+
+    ImGui::TextWrapped("Makes a game package from com.recomp.n64's template: the game's names, its N64Recomp "
+                       "config and an empty symbol list. No game code: the game is recompiled from the player's ROM.");
+    ImGui::InputText("Id", id, sizeof(id));
+    if (ImGui::IsItemHovered())
+    {
+        ImGui::SetTooltip("Short, lower-case letters and digits: mk64 makes Packages/com.recomp.mk64 and Lib/mk64.lib");
+    }
+    ImGui::InputText("Title", title, sizeof(title));
+    ImGui::InputText("Region", region, sizeof(region));
+    if (ImGui::IsItemHovered())
+    {
+        ImGui::SetTooltip("The ROM's region, for file names: us, eu, jp, ...");
+    }
+
+    const bool canCreate = id[0] != 0 && title[0] != 0 && region[0] != 0;
+    if (!canCreate) ImGui::BeginDisabled();
+    if (ImGui::Button("Create"))
+    {
+#if PLATFORM_WINDOWS
+        const std::string script = ProjectDir() + "Packages/com.recomp.n64/Native/tools/recomp/new_game.ps1";
+        const std::string command = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"" + script + "\" -Project \"" +
+                                    ProjectDir() + ".\" -Id \"" + id + "\" -Title \"" + title + "\" -Region \"" + region + "\"";
+        if (!Exists(script))
+        {
+            status = "No " + script + " (update com.recomp.n64).";
+        }
+        else if (RunCommand(command, ProjectDir(), false))
+        {
+            status = std::string("Made Packages/com.recomp.") + id + ". Next: put the game's symbols in its Recomp/" + id +
+                     "." + region + ".syms.toml (see the file), then Set Up Game. Reload Native Addons to load its addon.";
+            sStatusValid = false;
+        }
+        else
+        {
+            status = "FAILED (see the log).";
+        }
+#else
+        status = "New Game Package runs on Windows so far (Native/tools/recomp/new_game.ps1).";
+#endif
+    }
+    if (!canCreate) ImGui::EndDisabled();
+    ImGui::SameLine();
+    const bool close = ImGui::Button("Close");
+    if (!status.empty())
+    {
+        ImGui::Separator();
+        ImGui::TextWrapped("%s", status.c_str());
+    }
+    if (close)
+    {
+        status.clear();
+    }
+    return !close;
+}
 }
 
 bool N64Dependencies::SetupAll(int32_t platform, const Options& options)
@@ -1137,6 +1342,14 @@ void N64Dependencies::RegisterSetUpGame(EditorUIHooks* hooks, uint64_t hookId)
     {
         return;
     }
+    hooks->AddMenuItem(hookId, "Tools", "Recomp/N64/New Game Package...",
+        [](void*) {
+            if (sHooks != nullptr && sHooks->OpenModal != nullptr)
+            {
+                sHooks->OpenModal(sHookId, kNewGameTitle, DrawNewGame, nullptr);
+            }
+        },
+        nullptr, nullptr);
     hooks->AddMenuItem(hookId, "Tools", "Recomp/N64/Set Up Game...",
         [](void*) {
             if (sHooks != nullptr && sHooks->OpenModal != nullptr)

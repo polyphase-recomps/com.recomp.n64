@@ -97,6 +97,18 @@ int port_env_int(const char *name)
     return (value != NULL) ? atoi(value) : 0;
 }
 
+static int sDevelopment;
+
+void port_set_development(int on)
+{
+    sDevelopment = on;
+}
+
+int port_development(void)
+{
+    return sDevelopment;
+}
+
 #ifndef PORT_WASM_HOST /* (the wasm guest keeps its arena and overlays in its own memory) */
 /* ---- arena ----------------------------------------------------------------
  * One reservation the backend places where every address inside it can be stored
@@ -327,6 +339,7 @@ int port_rom_load(const char *path)
     unsigned char header[16];
     unsigned int i;
     long size;
+    int swap = 0; /* .v64: 2 (bytes of halfwords), .n64: 4 (bytes of words) */
 
     if (f == NULL)
     {
@@ -368,9 +381,21 @@ int port_rom_load(const char *path)
             sRomRanges[i].file_offset = rom_be32(entry + 8);
         }
     }
-    else if (header[0] == 0x80 && header[1] == 0x37)
+    else if ((header[0] == 0x80 && header[1] == 0x37) || (header[0] == 0x37 && header[1] == 0x80) ||
+             (header[0] == 0x40 && header[1] == 0x12))
     {
-        /* A whole ROM: one range covering all of it. */
+        /* A whole ROM: one range covering all of it. .v64 dumps have the bytes of every halfword
+         * swapped, .n64 dumps those of every word: put back in order below. */
+        swap = (header[0] == 0x37) ? 2 : (header[0] == 0x40) ? 4 : 0;
+#ifdef PORT_ROM_STREAM
+        if (swap != 0)
+        {
+            port_log("'%s' is a byte-swapped (.v64 / .n64) dump; this platform reads the ROM in place, "
+                     "so it needs the .z64 byte order", path);
+            fclose(f);
+            return 0;
+        }
+#endif
         sRomSize = (unsigned int)size;
         sRomRangesNum = 1;
         sRomRanges[0].rom_offset = 0;
@@ -379,7 +404,7 @@ int port_rom_load(const char *path)
     }
     else
     {
-        port_log("'%s' is neither an asset pack nor a big-endian (.z64) N64 ROM", path);
+        port_log("'%s' is neither an asset pack nor an N64 ROM (.z64, .v64, .n64)", path);
         fclose(f);
         return 0;
     }
@@ -402,6 +427,26 @@ int port_rom_load(const char *path)
         return 0;
     }
     fclose(f);
+    if (swap != 0)
+    {
+        long at;
+
+        for (at = 0; at + 3 < size; at += 4)
+        {
+            unsigned char *p = sRomData + at, t;
+
+            if (swap == 2)
+            {
+                t = p[0]; p[0] = p[1]; p[1] = t;
+                t = p[2]; p[2] = p[3]; p[3] = t;
+            }
+            else
+            {
+                t = p[0]; p[0] = p[3]; p[3] = t;
+                t = p[1]; p[1] = p[2]; p[2] = t;
+            }
+        }
+    }
 #endif
     return 1;
 }

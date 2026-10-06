@@ -1,0 +1,22 @@
+# The game's functions for N64Recomp: every code section of the ROM (rom offset, vram, size) with
+# the functions in it (name, vram, size). Names and addresses only, no game code: it is what makes
+# a recompile possible, and the one thing a new game needs. Replace this file with the real list.
+#
+# Where it comes from (com.recomp.n64/Native/tools/recomp/ and the README there):
+#   - a decomp, even an unfinished one, that builds a matching ELF:
+#     N64Recomp <config with elf_path> --dump-context, then ido_static_funcs.py (IDO static
+#     functions) and splat_fill_gaps.py (the rest), checked with text_coverage.py
+#   - no decomp: a splat disassembly of the ROM gives the sections and function boundaries
+#
+# The format (one [[section]] per code section; overlays are sections sharing a vram):
+#
+# [[section]]
+# name = ".main"
+# rom = 0x00001000
+# vram = 0x80000400
+# size = 0x10000
+#
+# functions = [
+#     { name = "entrypoint", vram = 0x80000400, size = 0x60 },
+#     { name = "mainThread", vram = 0x80000460, size = 0x1A0 },
+# ]

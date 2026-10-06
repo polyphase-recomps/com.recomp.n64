@@ -98,10 +98,12 @@ $text = ($lines -join "`n") + "`n"
 if (-not (Test-Path $genToml) -or (Get-Content $genToml -Raw) -ne $text) { Set-Content -Path $genToml -Value $text -NoNewline }
 $romUsed = (Select-String -Path $genToml -Pattern '^rom_file_path = "(.*)"').Matches[0].Groups[1].Value
 if (-not (Test-Path $romUsed)) { throw "ROM not found: $romUsed (set the ROM in the N64 Recomp Target Options)" }
-$magic = [System.IO.File]::ReadAllBytes($romUsed)[0..3]
-if (-not ($magic[0] -eq 0x80 -and $magic[1] -eq 0x37 -and $magic[2] -eq 0x12 -and $magic[3] -eq 0x40)) {
+$header = [System.IO.File]::ReadAllBytes($romUsed)[0..23]
+if (-not ($header[0] -eq 0x80 -and $header[1] -eq 0x37 -and $header[2] -eq 0x12 -and $header[3] -eq 0x40)) {
     throw "$romUsed is not a big-endian .z64 ROM (Set Up Game converts .v64 / .n64 dumps)"
 }
+# the cartridge header's checksums: the runtime refuses to boot any other ROM
+$romCrc = -join ($header[16..23] | ForEach-Object { $_.ToString('X2') })
 if ($game -and $game.rom -and $game.rom.sha1) {
     $sha1 = (Get-FileHash $romUsed -Algorithm SHA1).Hash.ToLower()
     if ($sha1 -ne $game.rom.sha1.ToLower()) {
@@ -134,7 +136,8 @@ if ($stale) {
 $buildDir = Join-Path $Package "Native\build\recomp-$Config"
 $configure = @('-S', $recompDir, '-B', $buildDir, '-G', 'Ninja', "-DCMAKE_MAKE_PROGRAM=$ninja",
     "-DCMAKE_C_COMPILER=$llvm\clang.exe", "-DCMAKE_CXX_COMPILER=$llvm\clang++.exe", "-DCMAKE_BUILD_TYPE=$Config",
-    "-DN64PORT_ROOT=$(Fwd (Join-Path $n64 'Native'))", "-DN64RECOMP_GENERATED=$(Fwd $funcs)", "-DN64RECOMP_ROM=$(Fwd $romUsed)")
+    "-DN64PORT_ROOT=$(Fwd (Join-Path $n64 'Native'))", "-DN64RECOMP_GENERATED=$(Fwd $funcs)", "-DN64RECOMP_ROM=$(Fwd $romUsed)",
+    "-DN64RECOMP_ROM_CRC=$romCrc")
 if ($Decomp) { $configure += "-DN64RECOMP_DECOMP_DIR=$(Fwd $Decomp)" }
 & $cmake @configure | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'cmake configure failed (see the game package''s Recomp\CMakeLists.txt)' }

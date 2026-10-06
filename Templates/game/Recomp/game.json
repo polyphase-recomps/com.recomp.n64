@@ -1,0 +1,9 @@
+{
+    "title": "{{TITLE}}",
+    "config": "recomp.{{REGION}}.toml",
+    "rom": {
+        "file": "{{ID}}.{{REGION}}.z64",
+        "sha1": "",
+        "size": 0
+    }
+}

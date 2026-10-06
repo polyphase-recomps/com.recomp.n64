@@ -523,8 +523,9 @@ int n64_bridge_poll_event(char *name, unsigned name_cap, int *args, int max_args
 
 /* ---- embedding API ------------------------------------------------------------------------------ */
 /* Recomp mode runs the game's code from the ROM it was recompiled from and DMAs its overlays
- * (code and data) out of it, so it needs the whole ROM: an asset pack (the decomp build's game
- * data, no code) is refused, so a player can fall back to the ROM it is pointed at. */
+ * (code and data) out of it, so it needs the whole ROM (any byte order: port_rom_load puts
+ * .v64 / .n64 dumps in order): an asset pack (the decomp build's game data, no code) is refused,
+ * so a player can fall back to the ROM it is pointed at. */
 static int is_whole_rom(const char *path)
 {
     unsigned char magic[4] = {0, 0, 0, 0};
@@ -535,25 +536,82 @@ static int is_whole_rom(const char *path)
         fread(magic, 1, sizeof(magic), f);
         fclose(f);
     }
-    if (magic[0] == 0x80 && magic[1] == 0x37 && magic[2] == 0x12 && magic[3] == 0x40)
+    if ((magic[0] == 0x80 && magic[1] == 0x37 && magic[2] == 0x12 && magic[3] == 0x40) ||
+        (magic[0] == 0x37 && magic[1] == 0x80 && magic[2] == 0x40 && magic[3] == 0x12) ||
+        (magic[0] == 0x40 && magic[1] == 0x12 && magic[2] == 0x37 && magic[3] == 0x80))
     {
         return 1;
     }
-    port_log("'%s' is not a big-endian (.z64) N64 ROM; recompiled games boot from the whole ROM", path);
+    port_log(f == NULL ? "cannot open '%s'" : "'%s' is not an N64 ROM; recompiled games boot from the whole ROM", path);
     return 0;
+}
+
+/* The cartridge's boot chip (CIC), as the boot code leaves it in osCicId: told apart by the
+ * checksum of the ROM's boot code (0x40-0x1000). */
+static uint32_t cic_id(void)
+{
+    const unsigned char *boot = port_rom_view(0x40, 0x1000 - 0x40);
+    uint32_t crc = 0xFFFFFFFFu, i;
+    int bit;
+
+    for (i = 0; i < 0x1000 - 0x40; i++)
+    {
+        crc ^= boot[i];
+        for (bit = 0; bit < 8; bit++)
+        {
+            crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
+        }
+    }
+    switch (~crc)
+    {
+    case 0x6170A4A1u: return 6101;
+    case 0x0B050EE0u: return 6103;
+    case 0x98BC2C86u: return 6105;
+    case 0xACC8580Au: return 6106;
+    case 0x009E9EA3u: return 7102;
+    default: return 6102;
+    }
 }
 
 int n64_boot(const char *rom_path)
 {
+    int whole = is_whole_rom(rom_path);
+
 #ifdef RECOMP_DEFAULT_ROM
-    /* development builds: the ROM the game was recompiled from (N64RECOMP_ROM) */
-    if (!is_whole_rom(rom_path) && is_whole_rom(RECOMP_DEFAULT_ROM))
+    /* In the editor (port_set_development): the ROM the game was recompiled from (N64RECOMP_ROM).
+     * Packaged games only boot what they are given. */
+    if (!whole && port_development() && is_whole_rom(RECOMP_DEFAULT_ROM))
     {
         port_log("booting the ROM the game was recompiled from: %s", RECOMP_DEFAULT_ROM);
         rom_path = RECOMP_DEFAULT_ROM;
+        whole = 1;
     }
 #endif
-    if (!is_whole_rom(rom_path) || !port_rom_load(rom_path) || !recomp_mem_init())
+    if (!whole || !port_rom_load(rom_path))
+    {
+        return 0;
+    }
+#ifdef RECOMP_ROM_CRC
+    /* The code was recompiled from one ROM: another one (region, revision) would run it on the
+     * wrong data. The cartridge header's two checksums tell them apart. */
+    {
+        const unsigned char *h = port_rom_view(0x10, 8);
+        unsigned long long crc = 0;
+        int i;
+
+        for (i = 0; i < 8; i++)
+        {
+            crc = (crc << 8) | h[i];
+        }
+        if (crc != RECOMP_ROM_CRC)
+        {
+            port_log("'%s' is not the ROM this game was recompiled from (header checksums %016llX, expected %016llX)",
+                     rom_path, crc, (unsigned long long)RECOMP_ROM_CRC);
+            return 0;
+        }
+    }
+#endif
+    if (!recomp_mem_init())
     {
         return 0;
     }
@@ -565,17 +623,19 @@ int n64_boot(const char *rom_path)
     sViCurrentFb = sViNextFb = 0;
     memset(sTimers, 0, sizeof(sTimers));
 
-    /* IPL3: the first megabyte after the header goes to 0x80000400, and the boot globals */
-    recomp_mem_write_be(0x80000400u, port_rom_view(0x1000, 0x100000), 0x100000);
+    /* IPL3: the first megabyte after the header goes to the game's entry point (the config's
+     * `entrypoint`, 0x80000400 for most games), and the boot globals */
+    const uint32_t entry = (uint32_t)get_entrypoint_address();
+    recomp_mem_write_be(entry, port_rom_view(0x1000, 0x100000), 0x100000);
     rw_u32(0x80000300u, 1);           /* osTvType: NTSC */
     rw_u32(0x80000304u, 0);           /* osRomType: cartridge */
     rw_u32(0x80000308u, 0xB0000000u); /* osRomBase */
     rw_u32(0x8000030Cu, 0);           /* osResetType: cold */
-    rw_u32(0x80000310u, 6102);        /* osCicId */
+    rw_u32(0x80000310u, cic_id());    /* osCicId */
     rw_u32(0x80000314u, 0);           /* osVersion */
     rw_u32(0x80000318u, 0x400000u);   /* osMemSize: 4 MB */
     recomp_sections_init();
-    recomp_sections_on_dma(0x1000, 0x80000400u, 0x100000);
+    recomp_sections_on_dma(0x1000, entry, 0x100000);
 
     gPortVerbose = port_env_int("N64_VERBOSE"); /* bring-up aid: per-frame renderer statistics */
     /* the audio microcode: n_aspMain unless the game uses libultra's own aspMain (ABI 1) */

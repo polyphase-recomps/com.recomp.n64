@@ -1,0 +1,29 @@
+{
+    "name": "{{PACKAGE}}",
+    "author": "",
+    "description": "{{TITLE}} (N64), recompiled from your own ROM by N64Recomp and hosted as a Polyphase node.",
+    "version": "1.0.0",
+    "dependencies": {
+        "com.recomp.n64": "https://github.com/polyphase-recomps/com.recomp.n64",
+        "com.recomp.mod.base": "https://github.com/polyphase-recomps/com.recomp.mod.base"
+    },
+    "native": {
+        "target": "engine",
+        "sourceDir": "Source",
+        "binaryName": "{{PACKAGE}}",
+        "entrySymbol": "PolyphasePlugin_GetDesc",
+        "apiVersion": 3,
+        "resolveMode": "source",
+        "binaries": []
+    },
+    "nativePerPlatform": {
+        "Windows": {
+            "extraLibDirs": [
+                "Lib"
+            ],
+            "extraLibs": [
+                "{{ID}}.lib"
+            ]
+        }
+    }
+}

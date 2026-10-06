@@ -15,15 +15,20 @@ set(N64PORT_DIR "${CMAKE_CURRENT_LIST_DIR}/.." CACHE PATH "com.recomp.n64/Native
 set(N64PORT_INCLUDE_DIR "${N64PORT_DIR}/include")
 set(N64RECOMP_DIR "${N64PORT_DIR}/../ThirdParty/N64Recomp" CACHE PATH "vendored N64Recomp")
 set(N64RECOMP_THREAD_STACK_MB 4 CACHE STRING "native stack per N64 thread (MB)")
-# The ROM the game was recompiled from: n64_boot falls back to it when the path it is given is
-# not a whole ROM (a player still pointing at the decomp build's asset pack). Development only:
-# a packaged game asks the player for their ROM.
-set(N64RECOMP_ROM "" CACHE FILEPATH "ROM n64_boot falls back to (development builds)")
+# The ROM the game was recompiled from: in the editor (port_set_development) n64_boot falls back
+# to it when the path it is given is not a whole ROM (a player still pointing at the decomp
+# build's asset pack). Packaged games boot the ROM they ship with or ask the player for theirs.
+set(N64RECOMP_ROM "" CACHE FILEPATH "ROM n64_boot falls back to in the editor")
+# Its cartridge header checksums (16 hex digits, header bytes 0x10-0x17): n64_boot refuses any
+# other ROM, which would run the recompiled code on the wrong data.
+set(N64RECOMP_ROM_CRC "" CACHE STRING "header checksums of the ROM the game was recompiled from (hex)")
 
-#   n64port_recomp_game(<name> GENERATED <dir> GBI_INCLUDES <dirs> GBI_DEFS <defines>)
-#     GBI_INCLUDES / GBI_DEFS: what the display list interpreter (runtime/guest/port_gfx.c) is
-#     compiled with: the game's GBI headers (PR/gbi.h, a port_types.h) and its microcode
-#     defines (F3DEX_GBI_2, ...).
+#   n64port_recomp_game(<name> GENERATED <dir> [GBI_INCLUDES <dirs>] [GBI_DEFS <defines>])
+#     The display list interpreter and the audio interpreters (runtime/guest) are compiled with
+#     the runtime's own GBI / ABI headers (runtime/recomp/gbi: F3DEX2, written for it; checked
+#     against a decomp's by tools/recomp/check_gbi.py), so a game needs no decomp or SDK headers.
+#     GBI_INCLUDES: further header folders, searched after those (rarely needed);
+#     GBI_DEFS: extra defines for those files.
 function(n64port_recomp_game name)
     cmake_parse_arguments(ARG "" "GENERATED" "GBI_INCLUDES;GBI_DEFS" ${ARGN})
     if(NOT ARG_GENERATED OR NOT EXISTS "${ARG_GENERATED}/funcs.h")
@@ -56,6 +61,9 @@ function(n64port_recomp_game name)
     if(N64RECOMP_ROM)
         set_property(SOURCE "${rt}/recomp_io.c" APPEND PROPERTY COMPILE_DEFINITIONS "RECOMP_DEFAULT_ROM=\"${N64RECOMP_ROM}\"")
     endif()
+    if(N64RECOMP_ROM_CRC MATCHES "^[0-9A-Fa-f]+$")
+        set_property(SOURCE "${rt}/recomp_io.c" APPEND PROPERTY COMPILE_DEFINITIONS "RECOMP_ROM_CRC=0x${N64RECOMP_ROM_CRC}ull")
+    endif()
     # recomp_hooks.h: runtime functions the game's [[patches.hook]] text may call
     set_source_files_properties(${generated_c} PROPERTIES COMPILE_OPTIONS
         "$<$<C_COMPILER_ID:GNU,Clang>:-w;-fno-strict-aliasing;-include;recomp_hooks.h>$<$<C_COMPILER_ID:MSVC>:/FIrecomp_hooks.h>")
@@ -80,9 +88,9 @@ function(n64port_recomp_game name)
     # No PORT: that tells a decomp's patched headers (gbi.h, os.h, ...) to use the native port's
     # layouts (pointer-sized display list words, ...); here the data is the game's own.
     set_source_files_properties(${gfx} PROPERTIES
-        COMPILE_DEFINITIONS "${ARG_GBI_DEFS};PORT_RSP_HOST=1;PORT_RSP_RECOMP=1;_SIZE_T_DEF"
+        COMPILE_DEFINITIONS "${ARG_GBI_DEFS};F3DEX_GBI_2;PORT_RSP_HOST=1;PORT_RSP_RECOMP=1;_SIZE_T_DEF"
         COMPILE_OPTIONS "${gfx_options}"
-        INCLUDE_DIRECTORIES "${N64PORT_DIR}/runtime/host/include;${N64PORT_DIR}/runtime/guest;${N64PORT_INCLUDE_DIR}")
+        INCLUDE_DIRECTORIES "${rt}/gbi;${N64PORT_DIR}/runtime/host/include;${N64PORT_DIR}/runtime/guest;${N64PORT_INCLUDE_DIR}")
 
     add_executable(${name}_recomp_host "${N64PORT_DIR}/host/main.c")
     target_link_libraries(${name}_recomp_host PRIVATE ${name}_recomp)

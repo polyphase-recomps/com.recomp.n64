@@ -1,0 +1,18 @@
+# N64Recomp config for {{TITLE}}: recompiles the game from the player's ROM and the symbol
+# file here. Paths are relative to this file. The ROM is never part of this package: Set Up Game
+# (Tools > Recomp > N64) points rom_file_path at the player's copy, and fills in the entry point
+# from the ROM's header the first time (while it is 0).
+[input]
+entrypoint = 0x00000000
+symbols_file_path = "{{ID}}.{{REGION}}.syms.toml"
+rom_file_path = "../../../Assets/Recomp/Rom/{{ID}}.{{REGION}}.z64"
+output_func_path = "../Native/build/recomp/funcs"
+
+# Loops that spin on another thread are handled by the runtime's preemption points
+# (com.recomp.n64 tools/recomp/add_loop_checks.py). Game-specific fixes go here as
+# [[patches.hook]] / [[patches.instruction]] entries, e.g.
+#
+# [[patches.hook]]
+# func = "someFunction"
+# before_vram = 0x80001234
+# text = "recomp_wait_frame(rdram, ctx);"

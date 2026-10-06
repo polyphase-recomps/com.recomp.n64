@@ -31,6 +31,12 @@ extern unsigned int gPortProgress[8];
 
 int port_env_int(const char *name);
 
+/* The game runs inside the editor, on the developer's machine: runtimes may use development-only
+ * fallbacks then (a recompiled game boots the ROM it was built from when it finds no other).
+ * Off by default, so packaged games only use what they ship with. */
+void port_set_development(int on);
+int port_development(void);
+
 /* Bring-up aid: a fast free-running counter (CPU ticks where the platform has one, else 0) and
  * the display list interpreter's time split, filled while gPortVerbose is set:
  * [0] vertices, [1] texture loads, [2] texture lookups that hashed, [3] decodes; [4..7] counts. */
@@ -76,6 +82,8 @@ unsigned int port_file_read(const char *path, void *data, unsigned int size);
 int port_file_write(const char *path, const void *data, unsigned int size);
 
 /* ---- ROM ---------------------------------------------------------------- */
+/* An asset pack (tools/make_rom_pack.py) or a whole ROM; .v64 / .n64 dumps are put in .z64 order
+ * as they load (not when streaming, PORT_ROM_STREAM). */
 int port_rom_load(const char *path);
 /* Copy a piece of the ROM. */
 void port_rom_read(unsigned int offset, void *dst, unsigned int size);

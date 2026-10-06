@@ -22,7 +22,9 @@
  */
 #include <port_types.h>
 #include <PR/os.h>
+#if !defined(PORT_RSP_RECOMP) /* (the bank and sequence loaders, which recomp mode leaves out) */
 #include <PR/libaudio.h>
+#endif
 #include <PR/abi.h>
 #include <port_host.h>
 #if !defined(PORT_RSP_RECOMP)
