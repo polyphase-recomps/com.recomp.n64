@@ -4,9 +4,10 @@
 *.v64
 *.n64pak
 
-# Build output
+# Build output (/Lib/ is anchored: on case-insensitive filesystems a bare Lib/ also matched
+# ThirdParty/N64Recomp/lib, the vendored dependencies)
 build/
-Lib/
+/Lib/
 
 # Tooling
 __pycache__/
