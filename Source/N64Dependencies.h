@@ -20,14 +20,17 @@
 #include <cstdint>
 
 struct PolyphaseBuildContext;
+struct EditorUIHooks;
 
 namespace N64Dependencies
 {
 // Build profile options (Target Options).
 constexpr const char* kSetupOption = "n64.setupDependencies"; // "1" (default) runs the setup before packaging
 constexpr const char* kDecompOption = "n64.decompDir";        // decomp checkout; empty = the game package's default
-constexpr const char* kModeOption = "n64.buildMode";          // "decomp" (default) or "recomp"
-constexpr const char* kRomOption = "n64.romPath";             // recomp: the user's .z64; empty = the game's toml default
+// "auto" (default: each game as it was last set up, recomp after Set Up Game), "decomp" or "recomp"
+constexpr const char* kModeOption = "n64.buildMode";
+// recomp: the user's .z64; empty = the project's copy (Assets/Recomp/Rom), else the game's toml default
+constexpr const char* kRomOption = "n64.romPath";
 
 // What a setup builds: the profile's Build mode and its inputs (any may be null or empty).
 struct Options
@@ -48,4 +51,8 @@ void Tick();
 void CheckReady();
 // The "N64 Recomp" section of the Packaging window's Target Options.
 void DrawTargetOptions(const PolyphaseBuildContext* ctx);
+// Tools > Recomp > N64 > Set Up Game...: pick your ROM (checked against the game package's
+// Recomp/game.json, converted to .z64, optionally kept in the project's Assets/Recomp/Rom so
+// builds include it) and recompile the game from it.
+void RegisterSetUpGame(EditorUIHooks* hooks, uint64_t hookId);
 }

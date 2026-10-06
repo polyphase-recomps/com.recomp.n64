@@ -20,16 +20,22 @@
 
 #if EDITOR && (PLATFORM_WINDOWS || PLATFORM_LINUX)
 
+#include "AssetManager.h"
 #include "Engine.h"
 #include "EngineTypes.h"
 #include "Log.h"
+#include "Plugins/EditorUIHooks.h"
 #include "Plugins/PolyphaseBuildTargetAPI.h"
 
 #include "imgui.h"
 
 #include <atomic>
+#include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
+#include <iterator>
+#include <utility>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -341,11 +347,6 @@ std::vector<GamePackage> FindGamePackages()
     return games;
 }
 
-bool IsRecompMode(const char* mode)
-{
-    return mode != nullptr && std::string(mode) == "recomp";
-}
-
 // Lib/<lib>.mode, written by build_recomp.ps1 next to the library it published
 bool WindowsLibIsRecomp(const GamePackage& game)
 {
@@ -401,6 +402,213 @@ void ClearRecompMarker(const GamePackage& game)
 #else
     (void)game;
 #endif
+}
+
+// ---- recomp game data: Recomp/game.json, the ROM --------------------------------------
+
+std::string ReadText(const std::string& path)
+{
+    std::ifstream in(path.c_str(), std::ios::binary);
+    std::stringstream text;
+
+    if (in.is_open())
+    {
+        text << in.rdbuf();
+    }
+    return text.str();
+}
+
+// The value of the first "key": "value" or "key": number in a JSON text (game.json is flat
+// enough for this; it is ours).
+std::string JsonValue(const std::string& text, const char* key)
+{
+    const std::string quoted = std::string("\"") + key + "\"";
+    size_t at = text.find(quoted);
+
+    if (at == std::string::npos || (at = text.find(':', at + quoted.size())) == std::string::npos)
+    {
+        return "";
+    }
+    at = text.find_first_not_of(" \t\r\n", at + 1);
+    if (at == std::string::npos)
+    {
+        return "";
+    }
+    if (text[at] == '"')
+    {
+        const size_t end = text.find('"', at + 1);
+        return end == std::string::npos ? "" : text.substr(at + 1, end - at - 1);
+    }
+    const size_t end = text.find_first_of(",}\r\n", at);
+    return text.substr(at, end == std::string::npos ? std::string::npos : end - at);
+}
+
+struct GameInfo
+{
+    std::string title;   // "Super Smash Bros. (US)"
+    std::string romFile; // the name the ROM gets in the project: "ssb64.us.z64"
+    std::string sha1;    // of the .z64 the package recompiles (lower case hex)
+    uint64_t romSize = 0;
+};
+
+GameInfo ReadGameInfo(const GamePackage& game)
+{
+    const std::string text = ReadText(game.nativeDir + "../Recomp/game.json");
+    GameInfo info;
+
+    info.title = JsonValue(text, "title");
+    info.romFile = JsonValue(text, "file");
+    info.sha1 = JsonValue(text, "sha1");
+    info.romSize = strtoull(JsonValue(text, "size").c_str(), nullptr, 10);
+    for (char& c : info.sha1)
+    {
+        c = (char)tolower((unsigned char)c);
+    }
+    if (info.title.empty())
+    {
+        info.title = game.id;
+    }
+    if (info.romFile.empty())
+    {
+        info.romFile = game.id + ".z64";
+    }
+    return info;
+}
+
+// SHA-1 (FIPS 180-1), for checking that a ROM is the one a package recompiles
+std::string Sha1Hex(const std::vector<uint8_t>& data)
+{
+    uint32_t h[5] = {0x67452301u, 0xEFCDAB89u, 0x98BADCFEu, 0x10325476u, 0xC3D2E1F0u};
+    std::vector<uint8_t> msg(data);
+    const uint64_t bits = (uint64_t)data.size() * 8u;
+
+    msg.push_back(0x80);
+    while (msg.size() % 64 != 56)
+    {
+        msg.push_back(0);
+    }
+    for (int i = 7; i >= 0; --i)
+    {
+        msg.push_back((uint8_t)(bits >> (i * 8)));
+    }
+    auto rol = [](uint32_t v, int n) { return (v << n) | (v >> (32 - n)); };
+    for (size_t chunk = 0; chunk < msg.size(); chunk += 64)
+    {
+        uint32_t w[80];
+        for (int i = 0; i < 16; ++i)
+        {
+            const uint8_t* p = &msg[chunk + i * 4];
+            w[i] = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
+        }
+        for (int i = 16; i < 80; ++i)
+        {
+            w[i] = rol(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
+        }
+        uint32_t a = h[0], b = h[1], c = h[2], d = h[3], e = h[4];
+        for (int i = 0; i < 80; ++i)
+        {
+            uint32_t f, k;
+            if (i < 20) { f = (b & c) | (~b & d); k = 0x5A827999u; }
+            else if (i < 40) { f = b ^ c ^ d; k = 0x6ED9EBA1u; }
+            else if (i < 60) { f = (b & c) | (b & d) | (c & d); k = 0x8F1BBCDCu; }
+            else { f = b ^ c ^ d; k = 0xCA62C1D6u; }
+            const uint32_t t = rol(a, 5) + f + e + k + w[i];
+            e = d; d = c; c = rol(b, 30); b = a; a = t;
+        }
+        h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e;
+    }
+    char hex[41];
+    for (int i = 0; i < 5; ++i)
+    {
+        snprintf(hex + i * 8, 9, "%08x", h[i]);
+    }
+    return std::string(hex, 40);
+}
+
+// Reads a ROM dump and puts it in the .z64 (big-endian) byte order whatever it was dumped in:
+// .v64 swaps the bytes of every halfword, .n64 the bytes of every word. Empty on failure.
+std::vector<uint8_t> ReadRomAsZ64(const std::string& path, std::string& error)
+{
+    std::ifstream in(path.c_str(), std::ios::binary);
+    std::vector<uint8_t> rom((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+
+    if (!in.is_open() && rom.empty())
+    {
+        error = "cannot open " + path;
+        return {};
+    }
+    if (rom.size() < 0x1000 || rom.size() % 4 != 0)
+    {
+        error = path + " is not an N64 ROM (size)";
+        return {};
+    }
+    const uint32_t magic = ((uint32_t)rom[0] << 24) | ((uint32_t)rom[1] << 16) | ((uint32_t)rom[2] << 8) | rom[3];
+    if (magic == 0x37804012u) // .v64
+    {
+        for (size_t i = 0; i < rom.size(); i += 2)
+        {
+            std::swap(rom[i], rom[i + 1]);
+        }
+    }
+    else if (magic == 0x40123780u) // .n64
+    {
+        for (size_t i = 0; i < rom.size(); i += 4)
+        {
+            std::swap(rom[i], rom[i + 3]);
+            std::swap(rom[i + 1], rom[i + 2]);
+        }
+    }
+    else if (magic != 0x80371240u)
+    {
+        error = path + " is not an N64 ROM (unknown header)";
+        return {};
+    }
+    return rom;
+}
+
+bool MakeDirs(const std::string& dir)
+{
+    std::string path;
+
+    for (size_t i = 0; i < dir.size(); ++i)
+    {
+        path += dir[i];
+        if ((dir[i] == '/' || i + 1 == dir.size()) && path.size() > 3)
+        {
+#if PLATFORM_WINDOWS
+            CreateDirectoryA(path.c_str(), nullptr);
+#else
+            mkdir(path.c_str(), 0755);
+#endif
+        }
+    }
+    return Exists(dir);
+}
+
+bool WriteFileBytes(const std::string& path, const std::vector<uint8_t>& data)
+{
+    std::ofstream out(path.c_str(), std::ios::binary | std::ios::trunc);
+
+    out.write((const char*)data.data(), (std::streamsize)data.size());
+    return out.good();
+}
+
+// Keeps `line` in a .gitignore (a project that is a git repository, or already has one).
+void EnsureIgnored(const std::string& projectDir, const char* line, const char* comment)
+{
+    const std::string path = projectDir + ".gitignore";
+
+    if (!Exists(path) && !Exists(projectDir + ".git"))
+    {
+        return;
+    }
+    const std::string text = ReadText(path);
+    if (text.find(line) != std::string::npos)
+    {
+        return;
+    }
+    std::ofstream out(path.c_str(), std::ios::binary | std::ios::app);
+    out << (text.empty() || text.back() == '\n' ? "" : "\n") << comment << "\n" << line << "\n";
 }
 
 std::vector<GameStatus> GetStatus()
@@ -597,16 +805,39 @@ bool SetupGame(const GamePackage& game, int32_t platform, const std::string& dec
     return ok;
 }
 
+enum class BuildMode
+{
+    Auto,   // each game as it was last set up: recomp if its Windows library is (or it has no decomp)
+    Decomp,
+    Recomp
+};
+
+BuildMode ParseMode(const char* mode)
+{
+    const std::string value = mode ? mode : "";
+    return value == "recomp" ? BuildMode::Recomp : value == "decomp" ? BuildMode::Decomp : BuildMode::Auto;
+}
+
+bool UseRecomp(const GamePackage& game, BuildMode mode)
+{
+    switch (mode)
+    {
+    case BuildMode::Recomp: return true;
+    case BuildMode::Decomp: return false;
+    default: return !game.hasDecomp || (game.hasRecomp && WindowsLibIsRecomp(game));
+    }
+}
+
 struct SetupRequest
 {
     std::string decomp, rom;
-    bool recomp;
+    BuildMode mode;
 };
 
 SetupRequest MakeRequest(const N64Dependencies::Options& options)
 {
     return {Slashes(options.decompDir ? options.decompDir : ""), Slashes(options.romPath ? options.romPath : ""),
-            IsRecompMode(options.mode)};
+            ParseMode(options.mode)};
 }
 
 bool SetupGames(int32_t platform, const SetupRequest& request, bool background)
@@ -615,12 +846,209 @@ bool SetupGames(int32_t platform, const SetupRequest& request, bool background)
 
     for (const GamePackage& game : FindGamePackages())
     {
-        ok = SetupGame(game, platform, request.decomp, request.recomp, request.rom, background) && ok;
+        ok = SetupGame(game, platform, request.decomp, UseRecomp(game, request.mode), request.rom, background) && ok;
     }
     return ok;
 }
 
 const char* kDoneHint = "Reload Native Addons so the editor links the rebuilt game";
+
+// ---- Set Up Game (Tools > Recomp > N64 > Set Up Game...) ---------------------------------
+// The user's ROM -> checked, in .z64 order, optionally kept in the project's Assets/Recomp/Rom
+// (packaged with the project's builds, git-ignored) -> the game recompiled from it.
+
+const char* kSetUpTitle = "Set Up N64 Game";
+const char* kProjectRomDir = "Assets/Recomp/Rom/";
+
+EditorUIHooks* sHooks = nullptr;
+uint64_t sHookId = 0;
+std::string sSetUpStatus;        // the dialog's progress line (under sLock)
+std::string sPendingRawAsset;    // a ROM copied into the project, registered for packaging by Tick (under sLock)
+
+void SetUpStatus(const std::string& line)
+{
+    {
+        std::lock_guard<std::mutex> guard(sLock);
+        sSetUpStatus = line;
+    }
+    Emit("[n64] " + line, true);
+}
+
+bool SetUpGame(const GamePackage& game, const std::string& romIn, bool copyToProject)
+{
+    const GameInfo info = ReadGameInfo(game);
+    std::string error;
+
+    SetUpStatus("reading " + romIn);
+    const std::vector<uint8_t> rom = ReadRomAsZ64(Slashes(romIn), error);
+    if (rom.empty())
+    {
+        SetUpStatus("SETUP FAILED: " + error);
+        return false;
+    }
+    SetUpStatus("checking the ROM");
+    const std::string sha1 = Sha1Hex(rom);
+    if (!info.sha1.empty() && sha1 != info.sha1)
+    {
+        SetUpStatus("SETUP FAILED: this is not the ROM " + game.id + " recompiles (" + info.title + "): sha1 " + sha1 +
+                    ", expected " + info.sha1 + ". Another region or revision, or a bad dump?");
+        return false;
+    }
+
+    // Where the .z64 is kept: in the project (shipped with its builds), or in the package's
+    // build folder (this machine only)
+    const std::string dir = copyToProject ? ProjectDir() + kProjectRomDir : game.nativeDir + "build/recomp/rom/";
+    const std::string target = dir + info.romFile;
+    if (!MakeDirs(dir))
+    {
+        SetUpStatus("SETUP FAILED: cannot create " + dir);
+        return false;
+    }
+    std::string existingError;
+    const std::vector<uint8_t> existing = Exists(target) ? ReadRomAsZ64(target, existingError) : std::vector<uint8_t>();
+    if (existing != rom)
+    {
+        SetUpStatus("writing " + target);
+        if (!WriteFileBytes(target, rom))
+        {
+            SetUpStatus("SETUP FAILED: cannot write " + target);
+            return false;
+        }
+    }
+    if (copyToProject)
+    {
+        EnsureIgnored(ProjectDir(), "Assets/Recomp/Rom/",
+                      "# Your own N64 ROMs (Set Up Game): shipped with your builds, never committed");
+        std::lock_guard<std::mutex> guard(sLock);
+        sPendingRawAsset = std::string(GetEngineState()->mProjectDirectory) + kProjectRomDir + info.romFile;
+    }
+
+    SetUpStatus("recompiling " + info.title + " (the first time takes a minute)");
+    const bool ok = SetupRecomp(game, (int32_t)Platform::Windows, "", target, true);
+    SetUpStatus(ok ? info.title + " is set up. " + kDoneHint + ", then press Play."
+                   : std::string("SETUP FAILED while building (see the log)"));
+    return ok;
+}
+
+// The games that can be set up from a ROM, as the dialog lists them
+struct SetUpChoice
+{
+    GamePackage game;
+    GameInfo info;
+};
+
+std::vector<SetUpChoice> SetUpChoices()
+{
+    std::vector<SetUpChoice> choices;
+
+    for (const GamePackage& game : FindGamePackages())
+    {
+        if (game.hasRecomp)
+        {
+            choices.push_back({game, ReadGameInfo(game)});
+        }
+    }
+    return choices;
+}
+
+bool DrawSetUpGame(void*)
+{
+    static std::vector<SetUpChoice> choices;
+    static bool listed = false;
+    static int selected = 0;
+    static char rom[1024] = "";
+    static bool copyToProject = true;
+
+    if (!listed)
+    {
+        choices = SetUpChoices();
+        listed = true;
+    }
+    if (choices.empty())
+    {
+        ImGui::TextUnformatted("No N64 game package in this project can be recompiled from a ROM\n"
+                               "(a Packages/<game>/Recomp folder with game.json and CMakeLists.txt).");
+        const bool close = ImGui::Button("Close");
+        if (close) listed = false;
+        return !close;
+    }
+    if (selected >= (int)choices.size())
+    {
+        selected = 0;
+    }
+
+    const bool running = sRunning;
+    if (running) ImGui::BeginDisabled();
+
+    if (ImGui::BeginCombo("Game", choices[selected].info.title.c_str()))
+    {
+        for (int i = 0; i < (int)choices.size(); ++i)
+        {
+            if (ImGui::Selectable(choices[i].info.title.c_str(), i == selected)) selected = i;
+        }
+        ImGui::EndCombo();
+    }
+    const GameInfo& info = choices[selected].info;
+
+    ImGui::InputText("ROM", rom, sizeof(rom));
+    ImGui::SameLine();
+    if (ImGui::Button("Browse...") && sHooks != nullptr && sHooks->ShowOpenFileDialog != nullptr)
+    {
+        sHooks->ShowOpenFileDialog("Your N64 ROM", "N64 ROM|*.z64;*.n64;*.v64", nullptr, rom, (int)sizeof(rom));
+    }
+    if (!info.sha1.empty())
+    {
+        ImGui::TextDisabled("Expects %s, sha1 %.12s... (.z64, .v64 and .n64 dumps all work)", info.title.c_str(),
+                            info.sha1.c_str());
+    }
+
+    ImGui::Checkbox("Keep a copy in the project (Assets/Recomp/Rom)", &copyToProject);
+    ImGui::TextWrapped(copyToProject
+                           ? "The project's builds then include your ROM, so they run anywhere without asking for it. "
+                             "They are for your own use: do not share them. The copy is git-ignored."
+                           : "The ROM is kept in the game package's build folder: this machine only. Packaged builds "
+                             "will ask the player for their ROM.");
+
+    const bool canStart = rom[0] != 0;
+    if (!canStart) ImGui::BeginDisabled();
+    if (ImGui::Button("Set Up"))
+    {
+        if (sThread.joinable())
+        {
+            sThread.join();
+        }
+        sRunning = true;
+        const GamePackage game = choices[selected].game;
+        const std::string path = rom;
+        const bool copy = copyToProject;
+        sThread = std::thread([game, path, copy]() {
+            SetUpGame(game, path, copy);
+            sRunning = false;
+            sFinished = true;
+        });
+    }
+    if (!canStart) ImGui::EndDisabled();
+    if (running) ImGui::EndDisabled();
+
+    ImGui::SameLine();
+    const bool close = ImGui::Button("Close");
+
+    std::string status;
+    {
+        std::lock_guard<std::mutex> guard(sLock);
+        status = sSetUpStatus;
+    }
+    if (!status.empty())
+    {
+        ImGui::Separator();
+        ImGui::TextWrapped("%s%s", running ? "Working: " : "", status.c_str());
+    }
+    if (close)
+    {
+        listed = false; // list the packages again next time
+    }
+    return !close;
+}
 }
 
 bool N64Dependencies::SetupAll(int32_t platform, const Options& options)
@@ -684,6 +1112,43 @@ void N64Dependencies::Tick()
             sThread.join();
         }
     }
+
+    // A ROM Set Up Game copied into the project: packaged with the project's builds from now
+    // on (the editor otherwise finds raw assets when it scans the project)
+    std::string rawAsset;
+    {
+        std::lock_guard<std::mutex> guard(sLock);
+        rawAsset.swap(sPendingRawAsset);
+    }
+    if (!rawAsset.empty() && AssetManager::Get() != nullptr)
+    {
+        RawAssetEntry entry;
+        entry.mAbsolutePath = rawAsset;
+        entry.mEngineAsset = false;
+        AssetManager::Get()->AddRawAssetEntry(entry);
+    }
+}
+
+void N64Dependencies::RegisterSetUpGame(EditorUIHooks* hooks, uint64_t hookId)
+{
+    sHooks = hooks;
+    sHookId = hookId;
+    if (hooks == nullptr || hooks->AddMenuItem == nullptr)
+    {
+        return;
+    }
+    hooks->AddMenuItem(hookId, "Tools", "Recomp/N64/Set Up Game...",
+        [](void*) {
+            if (sHooks != nullptr && sHooks->OpenModal != nullptr)
+            {
+                sHooks->OpenModal(sHookId, kSetUpTitle, DrawSetUpGame, nullptr);
+            }
+            else
+            {
+                LogWarning("[n64] Set Up Game needs an editor with addon dialogs (OpenModal)");
+            }
+        },
+        nullptr, nullptr);
 }
 
 void N64Dependencies::CheckReady()
@@ -733,11 +1198,13 @@ void N64Dependencies::DrawTargetOptions(const PolyphaseBuildContext* ctx)
     {
         ctx->GetProfileSetting(kModeOption, modeValue, sizeof(modeValue));
     }
-    int mode = IsRecompMode(modeValue) ? 1 : 0;
-    const char* modes[] = {"Decomp", "Recomp (from your ROM)"};
-    if (ImGui::Combo("Build mode", &mode, modes, 2) && ctx->SetProfileSetting != nullptr)
+    const char* modeValues[] = {"auto", "decomp", "recomp"};
+    const BuildMode parsed = ParseMode(modeValue);
+    int mode = parsed == BuildMode::Decomp ? 1 : parsed == BuildMode::Recomp ? 2 : 0;
+    const char* modes[] = {"Auto (as each game was last set up)", "Decomp", "Recomp (from your ROM)"};
+    if (ImGui::Combo("Build mode", &mode, modes, 3) && ctx->SetProfileSetting != nullptr)
     {
-        ctx->SetProfileSetting(kModeOption, mode == 1 ? "recomp" : "decomp");
+        ctx->SetProfileSetting(kModeOption, modeValues[mode]);
     }
     if (ImGui::IsItemHovered())
     {
@@ -746,6 +1213,8 @@ void N64Dependencies::DrawTargetOptions(const PolyphaseBuildContext* ctx)
                           "Recomp: the game is recompiled from your ROM by N64Recomp (the package's Recomp/\n"
                           "config) and runs on the recomp runtime; it boots from the whole ROM. For games\n"
                           "whose decomp is unfinished. Windows only so far.\n"
+                          "Auto: recomp for a game set up from a ROM (Tools > Recomp > N64 > Set Up Game) or\n"
+                          "without a decomp, decomp otherwise.\n"
                           "Both publish the same library name, so the game's addon is the same either way.");
     }
 
@@ -761,7 +1230,7 @@ void N64Dependencies::DrawTargetOptions(const PolyphaseBuildContext* ctx)
         }
         decompLoaded = true;
     }
-    if (mode == 1)
+    if (mode != 1)
     {
         if (ImGui::InputText("ROM (.z64)", rom, sizeof(rom)) && ctx->SetProfileSetting != nullptr)
         {
@@ -769,7 +1238,8 @@ void N64Dependencies::DrawTargetOptions(const PolyphaseBuildContext* ctx)
         }
         if (ImGui::IsItemHovered())
         {
-            ImGui::SetTooltip("Your own ROM of the game, big-endian (.z64). Empty: the path in the game\n"
+            ImGui::SetTooltip("Your own ROM of the game, big-endian (.z64), for recomp mode. Empty: the copy Set\n"
+                              "Up Game keeps in the project (Assets/Recomp/Rom), else the path in the game\n"
                               "package's Recomp/recomp.<region>.toml. It is recompiled on this machine; the\n"
                               "generated code stays in the package's build/ and Lib/ folders (git-ignored).");
         }
@@ -792,7 +1262,7 @@ void N64Dependencies::DrawTargetOptions(const PolyphaseBuildContext* ctx)
     }
     if (ImGui::Button("Setup Dependencies Now"))
     {
-        SetupAllAsync(ctx->basePlatform, {decomp, mode == 1 ? "recomp" : "decomp", rom});
+        SetupAllAsync(ctx->basePlatform, {decomp, modeValues[mode], rom});
     }
     if (ImGui::IsItemHovered())
     {
@@ -845,6 +1315,10 @@ void N64Dependencies::CheckReady()
 }
 
 void N64Dependencies::DrawTargetOptions(const PolyphaseBuildContext*)
+{
+}
+
+void N64Dependencies::RegisterSetUpGame(EditorUIHooks*, uint64_t)
 {
 }
 

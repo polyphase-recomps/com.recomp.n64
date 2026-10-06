@@ -4,7 +4,10 @@
 #   build_recomp.ps1 -Package <Packages\com.recomp.<game>> -Rom <your .z64> [-Decomp <dir>] [-Config RelWithDebInfo]
 #
 # The game package provides Recomp\ (recomp.<region>.toml, its symbol files, CMakeLists.txt calling
-# n64port_recomp_game). Steps, each skipped when its output is up to date:
+# n64port_recomp_game, and game.json: title, config, the ROM's file name, sha1 and size).
+# The ROM: -Rom, else the project's copy (Assets\Recomp\Rom\<game.json rom.file>, which Tools >
+# Recomp > N64 > Set Up Game makes), else the toml's rom_file_path. Steps, each skipped when its
+# output is up to date:
 #   1. N64Recomp.exe from the vendored source (ThirdParty\N64Recomp)    -> Native\build\n64recomp
 #   2. the C: N64Recomp with the game's toml, this ROM and output folder -> <game>\Native\build\recomp\funcs
 #      then the loop preemption points (add_loop_checks.py)
@@ -27,12 +30,27 @@ $outDir = Join-Path $Package 'Native\build\recomp'
 $funcs = Join-Path $outDir 'funcs'
 function Fwd([string]$p) { return $p -replace '\\', '/' }
 
-# The game's config: one recomp.<region>.toml in Recomp\
-$tomls = @(Get-ChildItem $recompDir -Filter 'recomp.*.toml' -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -match '^recomp\.[A-Za-z0-9]+\.toml$' -and $_.Name -notmatch '\.(dev|gen|trig)\.toml$' })
-if ($tomls.Count -eq 0) { throw "no Recomp\recomp.<region>.toml in $Package" }
-if ($tomls.Count -gt 1) { Write-Host "several configs in Recomp\, using $($tomls[0].Name)" }
-$toml = $tomls[0].FullName
+# The game's config: game.json's, else the one recomp.<region>.toml in Recomp\
+$gameJson = Join-Path $recompDir 'game.json'
+$game = if (Test-Path $gameJson) { Get-Content $gameJson -Raw | ConvertFrom-Json } else { $null }
+if ($game -and $game.config) {
+    $toml = Join-Path $recompDir $game.config
+    if (-not (Test-Path $toml)) { throw "game.json names $($game.config), which is not in Recomp\" }
+} else {
+    $tomls = @(Get-ChildItem $recompDir -Filter 'recomp.*.toml' -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^recomp\.[A-Za-z0-9]+\.toml$' -and $_.Name -notmatch '\.(dev|gen|trig)\.toml$' })
+    if ($tomls.Count -eq 0) { throw "no Recomp\recomp.<region>.toml in $Package" }
+    if ($tomls.Count -gt 1) { Write-Host "several configs in Recomp\, using $($tomls[0].Name)" }
+    $toml = $tomls[0].FullName
+}
+# The project's copy of the ROM (the package sits in <project>\Packages\<id>)
+if (-not $Rom -and $game -and $game.rom -and $game.rom.file) {
+    # (or, when Set Up Game kept it out of the project, the package's build folder)
+    foreach ($candidate in @("..\..\Assets\Recomp\Rom\$($game.rom.file)", "Native\build\recomp\rom\$($game.rom.file)")) {
+        $path = Join-Path $Package $candidate
+        if (Test-Path $path) { $Rom = (Resolve-Path $path).Path; break }
+    }
+}
 
 # Visual Studio's x64 environment, clang, CMake and Ninja (as the decomp build uses)
 $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
@@ -82,7 +100,13 @@ $romUsed = (Select-String -Path $genToml -Pattern '^rom_file_path = "(.*)"').Mat
 if (-not (Test-Path $romUsed)) { throw "ROM not found: $romUsed (set the ROM in the N64 Recomp Target Options)" }
 $magic = [System.IO.File]::ReadAllBytes($romUsed)[0..3]
 if (-not ($magic[0] -eq 0x80 -and $magic[1] -eq 0x37 -and $magic[2] -eq 0x12 -and $magic[3] -eq 0x40)) {
-    throw "$romUsed is not a big-endian .z64 ROM (convert a .v64 / .n64 dump to .z64 first)"
+    throw "$romUsed is not a big-endian .z64 ROM (Set Up Game converts .v64 / .n64 dumps)"
+}
+if ($game -and $game.rom -and $game.rom.sha1) {
+    $sha1 = (Get-FileHash $romUsed -Algorithm SHA1).Hash.ToLower()
+    if ($sha1 -ne $game.rom.sha1.ToLower()) {
+        throw "$romUsed is not the ROM this package recompiles ($($game.title)): sha1 $sha1, expected $($game.rom.sha1)"
+    }
 }
 
 $stamp = Join-Path $outDir 'funcs.stamp'

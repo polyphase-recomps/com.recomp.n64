@@ -90,6 +90,7 @@ static void RegisterEditorUI(EditorUIHooks* hooks, uint64_t hookId)
             [](void*) { N64Dependencies::SetupAllAsync(0, {nullptr, nullptr, nullptr}); }, nullptr, nullptr);
     }
     hooks->RegisterOnPreBuild(hookId, OnPreBuild, nullptr);
+    N64Dependencies::RegisterSetUpGame(hooks, hookId);
     N64Dependencies::CheckReady();
 }
 
