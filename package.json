@@ -1,8 +1,11 @@
 {
     "name": "com.recomp.n64",
     "author": "",
-    "description": "Shared runtime for natively compiled N64 decomps (libultra shim, F3DEX2 renderer, audio, host backends, build rules). Game packages such as com.recomp.ssb64 build against Native/.",
+    "description": "Shared runtime for N64 games built from a decomp or recompiled from the player's ROM (libultra, F3DEX2 renderer, audio, host backends, N64Recomp, build rules, game launcher). Game packages such as com.recomp.ssb64 build against it.",
     "version": "1.0.0",
+    "dependencies": {
+        "com.recomp.mod.base": "https://github.com/polyphase-recomps/com.recomp.mod.base"
+    },
     "native": {
         "target": "engine",
         "sourceDir": "Source",

@@ -33,6 +33,10 @@ The canonical copy of this package lives at `P:\Projects\Recomp\Platforms\N64`. 
 take it as `Packages/com.recomp.n64`, and a game build can point at it directly with
 `-DN64PORT_ROOT=<path>/Native`.
 
+It depends on [com.recomp.mod.base](https://github.com/polyphase-recomps/com.recomp.mod.base)
+(`package.json`): the mod settings, resolution scaler and launcher the shared game code in
+`Source/Game` uses. Keep a clone of it in the project's `Packages/` next to this one.
+
 A game builds in one of these ways (Build mode in Packaging > Target Options > N64 Recomp; Auto
 keeps whichever a game was last set up in):
 
