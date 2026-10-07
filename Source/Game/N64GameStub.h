@@ -26,6 +26,10 @@ void n64_run_frame(void) {}
 void n64_shutdown(void) {}
 
 int n64_draws_to_screen(void) { return 0; }
+void n64_set_render_scale(int) {}
+int n64_render_scale(void) { return 1; }
+int n64_max_render_scale(void) { return 1; }
+unsigned long long n64_frame_signature(void) { return 0; }
 void n64_set_skip_draw(int) {}
 
 int n64_bridge_var_count(void) { return 0; }

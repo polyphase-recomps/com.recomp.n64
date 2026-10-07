@@ -236,12 +236,14 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--save") == 0 && i + 1 < argc) n64_set_save_path(argv[++i]);
         /* Recomp (live) builds: the game's recompiler data (game.json, toml, symbols) */
         else if (strcmp(argv[i], "--recomp-dir") == 0 && i + 1 < argc) n64_set_recomp_dir(argv[++i]);
+        /* Render scale: draw at 320x240 times N (the dumped frames are that size) */
+        else if (strcmp(argv[i], "--scale") == 0 && i + 1 < argc) n64_set_render_scale(atoi(argv[++i]));
         else
         {
             fprintf(stderr, "usage: <game>_host [--rom path] [--frames N] [--dump dir] [--every N] [--watchdog sec]\n"
                             "                  [--press-from F --press-every N [--press-buttons HEX]]\n"
                             "                  [--input script.txt] [--dump-from F] [--fuzz seed] [--wav out.wav]\n"
-                            "                  [--save file] [--recomp-dir dir]\n");
+                            "                  [--save file] [--recomp-dir dir] [--scale N]\n");
             return 2;
         }
     }
@@ -438,6 +440,7 @@ int main(int argc, char **argv)
             {
                 snprintf(path, sizeof(path), "%s/frame_%05d.ppm", dump, i);
                 write_ppm(path, fb, width, height);
+                fprintf(stderr, "frame %d signature %016llx\n", i, n64_frame_signature());
             }
         }
     }

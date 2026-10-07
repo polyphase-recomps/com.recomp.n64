@@ -11,11 +11,13 @@
 #include "Plugins/PolyphasePluginAPI.h"
 #include "Plugins/PolyphaseEngineAPI.h"
 
+#include "Game/N64GameApi.h"
 #include "Game/N64GamePlayer.h"
 #include "Game/N64Launcher.h"
 #include "Game/N64Lua.h"
 
-#include "ModBaseLauncher.h" // com.recomp.mod.base
+#include "ModBaseDisplay.h" // com.recomp.mod.base
+#include "ModBaseLauncher.h"
 #include "Game/N64Provider.h"
 
 #ifndef N64_GAME_PLUGIN_ENTRY
@@ -48,6 +50,10 @@ int OnLoad(PolyphaseEngineAPI* api)
     Recomp_RegisterProvider(&N64Provider::Get());
     // ... and can start it from a launcher (ModBaseLauncher.h)
     Recomp_RegisterLauncher(N64Launcher::AsRecompLauncher());
+#if defined(RECOMP_DISPLAY_HAS_RESOLUTION) && (PLATFORM_WINDOWS || PLATFORM_LINUX)
+    // ... and its renderer can draw larger than 320x240 (mod settings "Resolution")
+    Recomp_SetMaxResolution(n64_max_render_scale());
+#endif
 
     if (api && api->LogDebug)
     {

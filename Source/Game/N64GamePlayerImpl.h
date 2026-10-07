@@ -26,6 +26,7 @@
 #include "Plugins/PolyphaseEngineAPI.h"
 #include "System/System.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <fstream>
 #include <string>
@@ -452,6 +453,13 @@ void N64_GAME_PLAYER::UpdateDisplayTexture()
     {
         return;
     }
+    // drawn at a render scale (mod settings "Resolution"), the frame is a multiple of the N64's
+    // 320x240: the scaler, the window presets and the provider work with the N64's size, and
+    // the filter's Auto is smooth (the picture is then about the screen's size, not magnified)
+    const int renderScale = std::max(1, width / 320);
+    const int gameW = width / renderScale;
+    const int gameH = height / renderScale;
+    const bool autoLinear = renderScale > 1;
 
     EnsureDisplayQuad();
 
@@ -469,7 +477,7 @@ void N64_GAME_PLAYER::UpdateDisplayTexture()
         mFrameTexture = NewTransientAsset<Texture>();
         mFrameTexture->SetName("T_" N64_GAME_ID "_Frame");
         mFrameTexture->SetMipmapped(false);
-        mFrameTexture->SetFilterType(Recomp_DisplayFilterLinear() ? FilterType::Linear : FilterType::Nearest);
+        mFrameTexture->SetFilterType(Recomp_DisplayFilterLinear(autoLinear) ? FilterType::Linear : FilterType::Nearest);
         mFrameTexture->SetWrapMode(WrapMode::Clamp);
         mFrameTexture->Init(uint32_t(width), uint32_t(height), (uint8_t*)pixels);
         mFrameTexture->Create();
@@ -481,7 +489,7 @@ void N64_GAME_PLAYER::UpdateDisplayTexture()
         quad->SetVisible(true);
         // the resolution scaler (mod settings "Screen" / "Filter") places our own display;
         // a Quad the user bound keeps the layout they gave it
-        if (quad == mDisplayQuad && Recomp_DisplayApply(quad, mFrameTexture, width, height, 4.0f / 3.0f))
+        if (quad == mDisplayQuad && Recomp_DisplayApply(quad, mFrameTexture, gameW, gameH, 4.0f / 3.0f, autoLinear))
         {
             mFrameTexture->UpdatePixels(pixels, size_t(width) * size_t(height) * 4);
             mFrameTexture->Destroy(); // filter changed: a new texture next frame
@@ -490,8 +498,8 @@ void N64_GAME_PLAYER::UpdateDisplayTexture()
         }
     }
     mFrameTexture->UpdatePixels(pixels, size_t(width) * size_t(height) * 4);
-    N64Provider::Get().SetFrame(width, height);
-    Recomp_DisplayApplyWindow(width, height);
+    N64Provider::Get().SetFrame(gameW, gameH);
+    Recomp_DisplayApplyWindow(gameW, gameH);
 }
 
 void N64_GAME_PLAYER::Tick(float deltaTime)
@@ -503,6 +511,16 @@ void N64_GAME_PLAYER::Tick(float deltaTime)
     EnsureBooted();
     // mod settings: written to the game once it runs, kept, saved
     ModSettings::Get().Tick(&N64Provider::Get());
+#if defined(RECOMP_DISPLAY_HAS_RESOLUTION) && (PLATFORM_WINDOWS || PLATFORM_LINUX)
+    // "Resolution": the software renderer draws at 320x240 times this, from the next frame
+    {
+        const int scale = std::max(1, std::min(Recomp_DisplaySettings().resolution, n64_max_render_scale()));
+        if (scale != n64_render_scale())
+        {
+            n64_set_render_scale(scale);
+        }
+    }
+#endif
     if (!n64_is_running())
     {
         return;

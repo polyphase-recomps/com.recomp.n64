@@ -121,8 +121,21 @@ int n64_is_running(void);
 void n64_set_pad(int port, const PortPad *pad);
 void n64_run_frame(void);
 void n64_shutdown(void);
-/* RGBA8 framebuffer produced by the last frame (software renderer). */
+/* RGBA8 framebuffer produced by the last frame (software renderer): 320x240 times the render
+ * scale it was drawn at. */
 const unsigned char *n64_framebuffer(int *width, int *height);
+/* Render scale: the software renderer draws the game at 320x240 times this (1 = the N64's own
+ * picture; up to n64_max_render_scale(), 4 on 64-bit hosts). Takes effect from the next frame.
+ * GPU backends and builds without the software renderer report a maximum of 1. */
+#define N64_HAS_RENDER_SCALE 1
+void n64_set_render_scale(int scale);
+int n64_render_scale(void);
+int n64_max_render_scale(void);
+/* A hash of the display lists of the frame n64_framebuffer() shows (commands, vertices and
+ * matrices, not addresses): equal on two machines that drew the same frame, whatever their
+ * render scale or renderer. 0 when unknown. */
+#define N64_HAS_FRAME_SIGNATURE 1
+unsigned long long n64_frame_signature(void);
 /* Non-zero when a GPU backend draws the game straight into the host's render target instead:
  * there is no framebuffer to show, and each host frame needs at least one game frame. */
 int n64_draws_to_screen(void);

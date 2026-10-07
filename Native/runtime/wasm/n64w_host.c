@@ -359,6 +359,27 @@ void n64_shutdown(void)
 }
 
 #ifndef PORT_RSP_HOST /* (otherwise port_gfx.c's own) */
+/* the renderer runs inside the guest at the N64's size */
+void n64_set_render_scale(int scale)
+{
+    (void)scale;
+}
+
+int n64_render_scale(void)
+{
+    return 1;
+}
+
+int n64_max_render_scale(void)
+{
+    return 1;
+}
+
+unsigned long long n64_frame_signature(void)
+{
+    return 0;
+}
+
 const unsigned char *n64_framebuffer(int *width, int *height)
 {
     uint32_t fb;

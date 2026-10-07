@@ -60,6 +60,14 @@ void n64_run_frame(void);
 void n64_shutdown(void);
 const unsigned char* n64_framebuffer(int* width, int* height);
 int n64_draws_to_screen(void);
+// Render scale: the software renderer draws at 320x240 times this, from the next frame
+// (1..n64_max_render_scale(); 1 with a GPU backend). n64_framebuffer() reports the size.
+void n64_set_render_scale(int scale);
+int n64_render_scale(void);
+int n64_max_render_scale(void);
+// A hash of what the last frame drew, the same at every render scale (netplay's desync check)
+#define N64_HAS_FRAME_SIGNATURE 1
+unsigned long long n64_frame_signature(void);
 // While set, display lists are not drawn (logic still runs): all but the last of several game
 // frames run in one engine frame.
 void n64_set_skip_draw(int skip);

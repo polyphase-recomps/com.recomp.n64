@@ -75,12 +75,31 @@ typedef struct PortColor
 } PortColor;
 
 #ifndef PORT_GFX_GPU
-/* Software rasteriser targets (a GPU backend draws to its own). */
-static u8 sBack[FB_W * FB_H * 4];
-static u8 sFront[FB_W * FB_H * 4];
-static f32 sDepth[FB_W * FB_H];
+/*
+ * Render scale (n64_set_render_scale): the software rasteriser draws at FB_W x FB_H times
+ * sScale, from the same display lists. Coordinates stay in N64 pixels everywhere (scissor,
+ * rectangles, viewport) and are multiplied when pixels are touched, so scale 1 is exactly the
+ * N64 picture. The buffers are sized for the largest scale (PORT_GFX_MAX_SCALE: 4 on 64-bit
+ * hosts, about 15 MB; 1 elsewhere).
+ */
+#ifndef PORT_GFX_MAX_SCALE
+#if defined(PORT_64BIT) || defined(_WIN64) || defined(__LP64__)
+#define PORT_GFX_MAX_SCALE 4
+#else
+#define PORT_GFX_MAX_SCALE 1
+#endif
+#endif
+static u8 sBack[FB_W * FB_H * PORT_GFX_MAX_SCALE * PORT_GFX_MAX_SCALE * 4];
+static u8 sFront[FB_W * FB_H * PORT_GFX_MAX_SCALE * PORT_GFX_MAX_SCALE * 4];
+static f32 sDepth[FB_W * FB_H * PORT_GFX_MAX_SCALE * PORT_GFX_MAX_SCALE];
+static s32 sScale = 1, sScaleWanted = 1, sFrontScale = 1;
+static s32 sStride = FB_W; /* pixels per row of sBack / sDepth: FB_W * sScale */
 #endif
 static sb32 sHasFrame;
+/* Signature of the frame's display lists (n64_frame_signature): what was drawn, independent of
+ * the render scale and of where things are in memory. */
+static unsigned long long sSigBack = 0xCBF29CE484222325ULL, sSigFront;
+static void sig_add(const void *data, u32 size);
 
 static uintptr_t sSegments[16];
 static f32 sModelview[MTX_STACK_MAX][4][4];
@@ -243,6 +262,7 @@ static void gfx_matrix(u32 w0, uintptr_t w1)
         return;
     }
     gfx_trace_data("mtx", src, sizeof(*src));
+    sig_add(src, sizeof(*src));
     mtx_from_fixed(m, src);
     if (params & G_MTX_PROJECTION)
     {
@@ -303,6 +323,7 @@ static void gfx_vertices(u32 w0, uintptr_t w1)
     }
 #endif
     gfx_trace_data("vtx", src, (u32)count * sizeof(*src));
+    sig_add(src, (u32)count * sizeof(*src));
     for (i = 0; i < count; i++, src++)
     {
         PortVtx *v = &sVtx[first + i];
@@ -824,7 +845,7 @@ static u8 clamp_u8(f32 v)
 
 static void gfx_plot(s32 x, s32 y, const PortColor *c)
 {
-    u8 *dst = &sBack[(y * FB_W + x) * 4];
+    u8 *dst = &sBack[(y * sStride + x) * 4];
     f32 a = c->a;
 
     if ((sOtherModeL & (CVG_X_ALPHA | ALPHA_CVG_SEL | 3)) && a < 8.0F)
@@ -861,6 +882,11 @@ static void to_screen(PortScreenVtx *out, const PortVtx *v)
 
     out->x = v->x * iw * sVpScale[0] + sVpTrans[0];
     out->y = -v->y * iw * sVpScale[1] + sVpTrans[1];
+    if (sScale != 1)
+    {
+        out->x *= (f32)sScale;
+        out->y *= (f32)sScale;
+    }
     out->z = v->z * iw;
     out->iw = iw;
     out->s = v->s * iw; out->t = v->t * iw;
@@ -906,6 +932,10 @@ static void raster_triangle(const PortScreenVtx *v0, const PortScreenVtx *v1, co
         f32 dzdy = ((v1->x - v0->x) * (v2->z - v0->z) - (v2->x - v0->x) * (v1->z - v0->z)) / area;
 
         z_slack = (dzdx < 0.0F ? -dzdx : dzdx) + (dzdy < 0.0F ? -dzdy : dzdy) + 1.0e-5F;
+        if (sScale != 1)
+        {
+            z_slack *= (f32)sScale; /* the same slack as one N64 pixel */
+        }
     }
     /* Screen y points down, so front faces (counter-clockwise on N64) have negative area. */
     if ((sGeometryMode & G_CULL_BACK) && area > 0.0F) return;
@@ -918,8 +948,8 @@ static void raster_triangle(const PortScreenVtx *v0, const PortScreenVtx *v1, co
     if (v1->y < min_y) min_y = v1->y; if (v1->y > max_y) max_y = v1->y;
     if (v2->y < min_y) min_y = v2->y; if (v2->y > max_y) max_y = v2->y;
     x0 = (s32)min_x; x1 = (s32)max_x + 1; y0 = (s32)min_y; y1 = (s32)max_y + 1;
-    if (x0 < sScissor[0]) x0 = sScissor[0]; if (y0 < sScissor[1]) y0 = sScissor[1];
-    if (x1 > sScissor[2]) x1 = sScissor[2]; if (y1 > sScissor[3]) y1 = sScissor[3];
+    if (x0 < sScissor[0] * sScale) x0 = sScissor[0] * sScale; if (y0 < sScissor[1] * sScale) y0 = sScissor[1] * sScale;
+    if (x1 > sScissor[2] * sScale) x1 = sScissor[2] * sScale; if (y1 > sScissor[3] * sScale) y1 = sScissor[3] * sScale;
 
     for (y = y0; y < y1; y++)
     {
@@ -938,7 +968,7 @@ static void raster_triangle(const PortScreenVtx *v0, const PortScreenVtx *v1, co
             }
             z = w0 * v0->z + w1 * v1->z + w2 * v2->z;
             if (use_z && (sOtherModeL & Z_CMP) &&
-                (decal ? z > sDepth[y * FB_W + x] + z_slack : z >= sDepth[y * FB_W + x]))
+                (decal ? z > sDepth[y * sStride + x] + z_slack : z >= sDepth[y * sStride + x]))
             {
                 continue;
             }
@@ -964,7 +994,7 @@ static void raster_triangle(const PortScreenVtx *v0, const PortScreenVtx *v1, co
             }
             if (use_z && (sOtherModeL & Z_UPD))
             {
-                sDepth[y * FB_W + x] = z;
+                sDepth[y * sStride + x] = z;
             }
             gfx_plot(x, y, &out);
         }
@@ -1041,6 +1071,7 @@ static void gfx_fill_rect(u32 w0, u32 w1)
     }
     if (x0 < sScissor[0]) x0 = sScissor[0]; if (y0 < sScissor[1]) y0 = sScissor[1];
     if (x1 > sScissor[2]) x1 = sScissor[2]; if (y1 > sScissor[3]) y1 = sScissor[3];
+    x0 *= sScale; y0 *= sScale; x1 *= sScale; y1 *= sScale;
     if (gfx_is_offscreen())
     {
         /* Filling the depth image: clear the depth buffer. */
@@ -1048,7 +1079,7 @@ static void gfx_fill_rect(u32 w0, u32 w1)
         {
             for (x = x0; x < x1; x++)
             {
-                sDepth[y * FB_W + x] = 1.0e30F;
+                sDepth[y * sStride + x] = 1.0e30F;
             }
         }
         return;
@@ -1059,7 +1090,7 @@ static void gfx_fill_rect(u32 w0, u32 w1)
         {
             if (cycle == G_CYC_FILL)
             {
-                u8 *dst = &sBack[(y * FB_W + x) * 4];
+                u8 *dst = &sBack[(y * sStride + x) * 4];
 
                 dst[0] = (u8)sFill.r; dst[1] = (u8)sFill.g; dst[2] = (u8)sFill.b; dst[3] = 255;
             }
@@ -1097,6 +1128,18 @@ static void gfx_tex_rect(u32 w0, u32 w1, sb32 is_flip)
     ix0 = (s32)x0; iy0 = (s32)y0; ix1 = (s32)x1; iy1 = (s32)y1;
     if (ix0 < sScissor[0]) ix0 = sScissor[0]; if (iy0 < sScissor[1]) iy0 = sScissor[1];
     if (ix1 > sScissor[2]) ix1 = sScissor[2]; if (iy1 > sScissor[3]) iy1 = sScissor[3];
+    if (sScale != 1)
+    {
+        /* Pixels of the scaled picture: the rectangle's edges keep their sub-pixel position and
+         * the texture steps per scaled pixel shrink by the scale. */
+        f32 k = (f32)sScale;
+
+        ix0 = (s32)(x0 * k); iy0 = (s32)(y0 * k); ix1 = (s32)(x1 * k); iy1 = (s32)(y1 * k);
+        if (ix0 < sScissor[0] * sScale) ix0 = sScissor[0] * sScale; if (iy0 < sScissor[1] * sScale) iy0 = sScissor[1] * sScale;
+        if (ix1 > sScissor[2] * sScale) ix1 = sScissor[2] * sScale; if (iy1 > sScissor[3] * sScale) iy1 = sScissor[3] * sScale;
+        x0 *= k; y0 *= k;
+        dsdx /= k; dtdy /= k;
+    }
 
     for (y = iy0; y < iy1; y++)
     {
@@ -1122,7 +1165,7 @@ static void gfx_tex_rect(u32 w0, u32 w1, sb32 is_flip)
                 out = tex;
                 out.a = 255.0F;
                 {
-                    u8 *dst = &sBack[(y * FB_W + x) * 4];
+                    u8 *dst = &sBack[(y * sStride + x) * 4];
                     dst[0] = (u8)out.r; dst[1] = (u8)out.g; dst[2] = (u8)out.b; dst[3] = 255;
                 }
             }
@@ -1218,6 +1261,48 @@ static Gfx *gfx_dl_target(uintptr_t p1)
 static Gfx *sDlStack[DL_STACK_MAX];
 static s32 sDlDepth;
 
+/* ---- frame signature (n64_frame_signature) ------------------------------------------------- */
+#define SIG_SEED 0xCBF29CE484222325ULL
+
+static void sig_add(const void *data, u32 size)
+{
+    const u8 *bytes = data;
+    u32 i;
+
+    for (i = 0; i < size; i++)
+    {
+        sSigBack = (sSigBack ^ bytes[i]) * 0x100000001B3ULL;
+    }
+}
+
+/* Every command's first word, and its second unless that is an address (those are where things
+ * happen to be in memory: the vertices and matrices they point at are added by their loaders). */
+static void gfx_sig_command(u32 w0, uintptr_t p1)
+{
+    u32 w1 = (u32)p1;
+
+    sig_add(&w0, 4);
+    switch (w0 >> 24)
+    {
+    case G_VTX: case G_MTX: case G_DL: case G_MOVEMEM: case G_SETTIMG: case G_SETZIMG: case G_SETCIMG:
+    case G_RDPHALF_1:
+        return;
+    case G_MOVEWORD:
+        if (((w0 >> 16) & 0xFF) == G_MW_SEGMENT)
+        {
+            return;
+        }
+        break;
+    }
+#ifdef PORT_64BIT
+    if ((p1 >> 32) != 0)
+    {
+        return; /* a native pointer */
+    }
+#endif
+    sig_add(&w1, 4);
+}
+
 static void gfx_run(Gfx *dl)
 {
     Gfx **stack = sDlStack; /* static so a fault report can show the call chain */
@@ -1248,6 +1333,7 @@ static void gfx_run(Gfx *dl)
         }
         sCurDl = dl;
         dl++;
+        gfx_sig_command(w0, p1);
         switch (w0 >> 24)
         {
         case G_VTX:
@@ -1641,9 +1727,50 @@ void port_gfx_set_framebuffer(void *fb)
 #ifdef PORT_GFX_GPU
     port_gpu_frame_end();
 #else
-    port_memcpy(sFront, sBack, sizeof(sFront));
+    port_memcpy(sFront, sBack, (u32)(FB_W * FB_H * sScale * sScale * 4));
+    sFrontScale = sScale;
+    if (sScaleWanted != sScale)
+    {
+        /* between frames: the next one is drawn at the new size from the start */
+        sScale = sScaleWanted;
+        sStride = FB_W * sScale;
+    }
 #endif
+    sSigFront = sSigBack;
+    sSigBack = SIG_SEED;
     sHasFrame = TRUE;
+}
+
+void n64_set_render_scale(int scale)
+{
+#ifdef PORT_GFX_GPU
+    (void)scale; /* a GPU backend draws at the size it is given */
+#else
+    sScaleWanted = (scale < 1) ? 1 : (scale > PORT_GFX_MAX_SCALE) ? PORT_GFX_MAX_SCALE : scale;
+#endif
+}
+
+int n64_render_scale(void)
+{
+#ifdef PORT_GFX_GPU
+    return 1;
+#else
+    return sScaleWanted;
+#endif
+}
+
+int n64_max_render_scale(void)
+{
+#ifdef PORT_GFX_GPU
+    return 1;
+#else
+    return PORT_GFX_MAX_SCALE;
+#endif
+}
+
+unsigned long long n64_frame_signature(void)
+{
+    return sHasFrame ? sSigFront : 0;
 }
 
 int n64_draws_to_screen(void)
@@ -1666,11 +1793,13 @@ void n64_set_display_rect(float x, float y, float width, float height)
 
 const unsigned char *n64_framebuffer(int *width, int *height)
 {
+#ifdef PORT_GFX_GPU
     *width = FB_W;
     *height = FB_H;
-#ifdef PORT_GFX_GPU
     return NULL; /* the picture is in the GPU backend's render target */
 #else
+    *width = FB_W * sFrontScale;
+    *height = FB_H * sFrontScale;
     return sHasFrame ? sFront : NULL;
 #endif
 }

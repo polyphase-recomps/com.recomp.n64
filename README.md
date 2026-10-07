@@ -33,6 +33,11 @@ The canonical copy of this package lives at `P:\Projects\Recomp\Platforms\N64`. 
 take it as `Packages/com.recomp.n64`, and a game build can point at it directly with
 `-DN64PORT_ROOT=<path>/Native`.
 
+**Resolution.** The software renderer can draw the game at 2x, 3x or 4x its 320x240
+(`n64_set_render_scale`, 64-bit hosts; mod settings Display > "Resolution", `--scale N` in the
+headless runner). Scale 1 is exactly the N64 picture. Measured on SSB (fuzzed play, average per
+frame): 1x 1.6 ms, 2x 7 ms, 3x 14 ms, 4x 25 ms. GPU backends (consoles) draw at their own size.
+
 It depends on [com.recomp.mod.base](https://github.com/polyphase-recomps/com.recomp.mod.base)
 (`package.json`): the mod settings, resolution scaler and launcher the shared game code in
 `Source/Game` uses. Keep a clone of it in the project's `Packages/` next to this one.
